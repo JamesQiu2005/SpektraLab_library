@@ -2,7 +2,7 @@
  *
  * The whole surface is one call: a method name and a JSON object in, a JSON
  * object out. The same method table is served over stdio by `spklib-host`
- * (docs/PROTOCOL.md), so an app that links this library and an app that
+ * (API-SPEC.md), so an app that links this library and an app that
  * talks to the helper see the same methods, the same replies and the same
  * errors.
  *

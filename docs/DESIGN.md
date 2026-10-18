@@ -3,8 +3,8 @@
 spklib is SpektraLab's library SDK, introduced with SpektraLab 2.0.0. It tells the app where images are
 and keeps the data around them: libraries (catalogs and sessions), images, variants, ratings, colour
 tags, collections, and SpektraLab's own edits. It is native C++20 with a one-function C ABI, plus a
-stdio helper that serves the same methods. It is private: not open source, not part of the GPL desktop
-repository.
+stdio helper that serves the same methods. It is MIT licensed and lives in its own repository; the
+GPL desktop app ships its helper as a bundled binary.
 
 ## The boundary
 
@@ -118,15 +118,16 @@ See SESSION-DESIGN.md. Implemented for SpektraLab's own sessions:
 
 ## Licensing, and why the helper exists
 
-The SpektraLab desktop app is GPL-3.0-or-later, as a fork of spektrafilm. Linking a closed-source
-library into it, and shipping the result, would put the combined binary under the GPL's terms. That is
-a licence question for the owner, not a technical one. The design keeps both doors open:
+spklib is MIT. The SpektraLab desktop app is GPL-3.0-or-later (a fork of spektrafilm) and the mobile
+app is MIT. MIT code may be combined with either, so the licence no longer decides how the app
+reaches the SDK. The architecture does:
 
-- **`spklib-host`**, a separate executable. The app bundles it in `Contents/Helpers` and talks to it
-  over pipes. Programs that communicate at arm's length are separate works under the FSF's own reading,
-  and this is the path `tests/host_smoke.swift` exercises from Swift.
-- **`libspklib.a` and the C header**, for where linking is clean: the MIT/private mobile app, or the
-  desktop if the owner decides that is fine for code they alone wrote.
+- **`spklib-host`**, a separate executable, is what the desktop uses. The app bundles it in
+  `Contents/Helpers` and talks to it over pipes. The library then has its own process: a crash in it
+  cannot take a render down with it, the app's main actor never waits on SQLite, and the Windows and
+  Linux ports can drive the same binary the same way. `tests/host_smoke.swift` exercises this path
+  from Swift.
+- **`libspklib.a` and the C header** are for where a child process is impossible, as on iOS.
 
 The method table is the same in both, by construction: the host is a client of the C ABI.
 

@@ -5,7 +5,7 @@ Status: proposal, 2026-10-18. Scope: SpektraLab v2.0.0 library. Companion to the
 here mirrors that design; where this document names a table, column or store path that the catalog
 design names differently, the catalog design wins and this document should be updated to match.
 
-> **Implemented in 0.1.0** (see `docs/PROTOCOL.md` for the names as built):
+> **Implemented in 0.1.0** (see `API-SPEC.md` for the names as built):
 >
 > - **Native sessions.** §3.1 layout; §3.2 `session_folder` roles, paths relative to the session root;
 >   §3.4 rollback journal with `synchronous=FULL`.

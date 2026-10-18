@@ -1,4 +1,4 @@
-// spklib-host -- the SDK as a child process (docs/PROTOCOL.md).
+// spklib-host -- the SDK as a child process (API-SPEC.md).
 //
 // stdin carries one JSON request per line, stdout one JSON reply per line,
 // stderr is a free-form log. Requests run in order. The host is a client of

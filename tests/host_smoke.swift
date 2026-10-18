@@ -3,7 +3,7 @@
 //   swift tests/host_smoke.swift build/spklib-host "<catalog>.cocatalog"
 //
 // Starts spklib-host as a child process (as SpektraLab would from
-// Contents/Helpers), speaks docs/PROTOCOL.md over its pipes, links the catalog
+// Contents/Helpers), speaks API-SPEC.md over its pipes, links the catalog
 // into a throwaway library and reads it back. Exit status 0 when every reply
 // is what it should be.
 

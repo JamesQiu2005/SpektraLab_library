@@ -1,6 +1,6 @@
 # What a Capture One catalog holds, and what SpektraLab 2.0 reads
 
-Diagnosed 2026-10-18 on the owner's catalog (`/Volumes/disk/Capture One Catalog.cocatalog`), written by
+Diagnosed 2026-10-18 on a real working catalog of about 10,000 images, written by
 **Capture One 16.8.6.25 Pro Mac** (`ZVERSIONINFO`: format `16.8.6.25 Pro Mac`, compatible version
 160800; an earlier row says the catalog was made by 16.4.5.29 Studio). Every number below was read from a
 copy of the database; the catalog was not opened. `tests/tests.cpp` part 2 re-checks all of it on every
@@ -66,15 +66,15 @@ by number.
 The names are in the UI language. Roles come from the entity and the root's pointers, never from a name.
 
 **Three folder rows point at parents that no longer exist** (5352, 5354, 5355; e.g.
-`/Volumes/disk/backup/DCIM/115NZ7_2`). Capture One leaves these behind when an intermediate folder
+`<disk>/backup/DCIM/<card folder>`). Capture One leaves these behind when an intermediate folder
 row goes. spklib hangs each from its nearest ancestor folder by path, which is where Capture One shows
 it, and reports `parents_repaired: 3`.
 
 ### Where the files are, today
 
 9,581 of 10,149 images resolve to a file that exists. The 568 that do not are in folders no longer
-there (279 in `/Volumes/disk/pictures`, 273 in `…/Nikon Z8`, and a few on the camera card and the
-Desktop). spklib reports them (`exists: false`, `locations.list` → `online: false`). `location.relink`
+there (552 in two folders on an external disk that were reorganised, and a few on a camera card and
+the Desktop). spklib reports them (`exists: false`, `locations.list` → `online: false`). `location.relink`
 points SpektraLab at a folder's new place without touching Capture One.
 
 ## Optional: read, kept raw, not mapped

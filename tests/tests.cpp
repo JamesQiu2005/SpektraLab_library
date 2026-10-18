@@ -186,7 +186,7 @@ struct FakeCatalog {
                    std::to_string(v.pk) + ", -90.0, 0)");
             d.exec("INSERT INTO ZVARIANTMETADATA (Z_ENT, Z_PK, ZLAYER, ZBASIC_RATING, ZCOLOR_TAG_INDEX, ZCONTACT_CREATOR) VALUES (13, " +
                    std::to_string(v.layer) + ", " + std::to_string(v.layer) + ", " + std::to_string(v.rating) + ", " +
-                   std::to_string(v.color) + ", 'Hanze')");
+                   std::to_string(v.color) + ", 'A Photographer')");
         }
         d.exec("INSERT INTO ZCOLLECTION (Z_ENT, Z_PK, ZUUID, ZNAME, ZPARENT, ZCOLLECTIONINDEX, ZFOLDERLOCATION, ZALLIMAGESCOLLECTION,"
                " ZLASTIMPORTSCOLLECTION, ZLASTCAPTURESCOLLECTION, ZTRASHCOLLECTION) VALUES"

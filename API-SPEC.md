@@ -1,4 +1,16 @@
-# spklib protocol
+# spklib API spec
+
+| | |
+|---|---|
+| **Version** | 0.1.0: `abi` 1, library `schema` 1 (`sdk.version` reports them) |
+| **Transports** | the C ABI in `include/spklib/spklib.h`, and `spklib-host` over stdio. One method table serves both |
+| **Licence** | MIT, like the rest of this repository |
+| **Used by** | SpektraLab 2.0, which bundles `spklib-host` as a helper; see its `API-SPEC-library-helper.md` for how the app runs its library on this API |
+
+A change to a method's params or result, or to an error code, bumps `abi`. A change to the library
+file format bumps `schema`. Libraries are migrated forward on open, and an older SDK refuses a newer
+library rather than misreading it.
+
 
 One surface, two transports:
 
