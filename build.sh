@@ -5,13 +5,24 @@
 #   ./build.sh            libspklib.a + spklib-host + spklib-tests (native arch)
 #   ./build.sh universal  the same for arm64 + x86_64, lipo'd
 #   ./build.sh test       build, then run the tests (SPKLIB_C1_CATALOG for the real one)
+#   ./build.sh release    the helper as SpektraLab ships it: universal, optimised, stripped,
+#                         the commit in its version; build/release/spklib-host + .sha256
 set -euo pipefail
 cd "$(dirname "$0")"
 MODE="${1:-native}"
 OUT=build
 mkdir -p "$OUT"
 VERSION="$(cat VERSION)"
-CXXFLAGS=(-std=c++20 -O2 -g -Wall -Wextra -Wno-unused-parameter -Iinclude -Isrc -Ithird_party
+if [ "$MODE" = release ]; then
+  if [ -n "$(git status --porcelain -- src host include third_party VERSION)" ]; then
+    echo "release: the sources have uncommitted changes; a shipped binary must name a commit" >&2
+    exit 1
+  fi
+  VERSION="$VERSION+$(git rev-parse --short=12 HEAD)"
+fi
+DEBUG=(-g)
+[ "$MODE" = release ] && DEBUG=(-DNDEBUG)
+CXXFLAGS=(-std=c++20 -O2 "${DEBUG[@]}" -Wall -Wextra -Wno-unused-parameter -Iinclude -Isrc -Ithird_party
           -DSPKLIB_VERSION="\"$VERSION\"" -DSPKLIB_FIXTURES="\"$PWD/tests/fixtures\"" -mmacosx-version-min=13.0)
 SRCS=(src/sqlite.cpp src/capture_one.cpp src/library.cpp src/api.cpp)
 LIBS=(-lsqlite3 -framework CoreFoundation)
@@ -47,5 +58,20 @@ case "$MODE" in
     lipo -create "$OUT/arm64/spklib-host" "$OUT/x86_64/spklib-host" -output "$OUT/universal/spklib-host"
     lipo -info "$OUT/universal/spklib-host"
     ;;
-  *) echo "usage: $0 [native|universal|test]" >&2; exit 2 ;;
+  release)
+    build_arch arm64
+    build_arch x86_64
+    mkdir -p "$OUT/release"
+    lipo -create "$OUT/arm64/spklib-host" "$OUT/x86_64/spklib-host" -output "$OUT/release/spklib-host"
+    strip -x "$OUT/release/spklib-host"
+    # Ad-hoc: Apple silicon kills an unsigned arm64 binary on launch. The app
+    # build replaces this with its Developer ID signature when it copies the
+    # helper in (Code Sign On Copy), so this is never the shipped signature.
+    codesign --force --sign - "$OUT/release/spklib-host"
+    (cd "$OUT/release" && shasum -a 256 spklib-host > spklib-host.sha256)
+    "$OUT/release/spklib-host" --version
+    lipo -info "$OUT/release/spklib-host"
+    cat "$OUT/release/spklib-host.sha256"
+    ;;
+  *) echo "usage: $0 [native|universal|test|release]" >&2; exit 2 ;;
 esac
