@@ -71,7 +71,7 @@ times are UTC (`…Z`).
 | `meta.set` | L | `variants[]` or `images[]` (→ first variant); `rating` 0–5 / null, `color_tag` 0–7 / null | `updated` | overrides |
 | `images.trash` | L | `images[]`, `trashed` true / false / null | `updated`, `files_moved: false` | override |
 | `variant.create` | L | `image`, `from_variant`? | `variant`, `position`, `edit_copied` | variant |
-| `images.add` | L | `items[]`: path or `{path, metadata}`; `mode` `reference`/`copy`; `collection`? (a SpektraLab album); `destination`? (relative folder for copies); `recent_import`? (default true) | `added`, `results[] {path, image, variant, existing, stored_at?, error?}`, `recent_import`? (the new Recent Imports album) | rows; files only with `copy`, never overwriting |
+| `images.add` | L | `items[]`: path or `{path, metadata}`; `mode` `reference`/`copy`; `collection`? (a SpektraLab album); `destination`? (relative folder for copies); `recent_import`? (default true) | `added`, `results[] {path, image, variant, existing, stored_at?, error?}`, `recent_import`? (the new Recent Imports album; in a Capture One mirror it goes under a Recent Imports row of SpektraLab's beside Capture One's, made the first time) | rows; files only with `copy`, never overwriting |
 | `collection.create` | L | `kind` (album/group/project/smart_album), `name`, `parent`?, `criteria`? (an `images.list` filter) | `collection` | |
 | `collection.update` | L | `collection`, `name`? `parent`? `criteria`? `position`? | | |
 | `collection.delete` | L | `collection`, `recursive`? | `deleted`, `images_deleted: 0` | |

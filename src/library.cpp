@@ -2390,11 +2390,29 @@ Json Library::describe(const Json& params) {
 // --- Recent Imports -----------------------------------------------------------------------------
 
 std::optional<int64_t> Library::new_recent_import(const std::vector<int64_t>& images) {
-    if (images.empty() || meta("origin_kind", "none") != "none") return std::nullopt;
-    auto r = db_.prepare("SELECT id FROM collection WHERE kind = 'recent_imports' AND origin = 'local' LIMIT 1");
-    if (!r.step()) return std::nullopt;
-    const int64_t parent = r.i64(0);
+    if (images.empty()) return std::nullopt;
     const double now = now_unix();
+    std::optional<int64_t> found;
+    {
+        auto r = db_.prepare("SELECT id FROM collection WHERE kind = 'recent_imports' AND origin = 'local' LIMIT 1");
+        if (r.step()) found = r.i64(0);
+    }
+    if (!found && meta("origin_kind", "none") != "none") {
+        // A Capture One mirror takes imports as a SpektraLab catalog does. Capture One's own Recent
+        // Imports row is Capture One's, so SpektraLab's imports get a row of SpektraLab's beside it, made
+        // the first time, under the mirror's root. A sync writes only rows
+        // whose origin is capture_one, so this one and its albums outlive every sync.
+        auto root = db_.prepare("SELECT id FROM collection WHERE kind = 'root' ORDER BY origin = 'local' DESC, id LIMIT 1");
+        std::optional<int64_t> root_id;
+        if (root.step()) root_id = root.i64(0);
+        auto mk = db_.prepare("INSERT INTO collection(uuid, parent_id, kind, name, position, created_at) VALUES"
+                              " (?, ?, 'recent_imports', 'Recent Imports', 1, ?)");
+        mk.bind(1, new_uuid()).bind(2, root_id).bind(3, now);
+        mk.run();
+        found = db_.last_insert_id();
+    }
+    if (!found) return std::nullopt;
+    const int64_t parent = *found;
     // Named in this Mac's local time, as Capture One names them; the app can
     // spell `created_at` (UTC) in its own language instead.
     time_t secs = time_t(now);

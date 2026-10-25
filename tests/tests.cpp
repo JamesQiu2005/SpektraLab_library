@@ -849,6 +849,38 @@ static void synthetic() {
         CHECK(!c("images.add", {{"library", L}, {"items", {(root / "a.NEF").string()}}}).contains("recent_import"));
     });
 
+    run("an import into a Capture One mirror is a Recent Imports album of SpektraLab's, and outlives a sync", [] {
+        fs::path root = tmpdir("mirror-import");
+        FakeCatalog fc(root);
+        touch(root / "New/x.NEF", "x");
+        touch(root / "New/y.NEF", "y");
+        Ctx c;
+        std::string L = c("capture_one.link", {{"source", fc.package.string()}, {"path", (root / "M").string()}})["library"];
+        Json add = c("images.add", {{"library", L}, {"items", {(root / "New/x.NEF").string(), (root / "New/y.NEF").string()}}});
+        CHECK(add.contains("recent_import"));
+        std::string album = add["recent_import"];
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        Json al = find_by(cols, "uuid", album);
+        CHECK_EQ(al["image_count"].get<int>(), 2);
+        CHECK_EQ(al["origin"].get<std::string>(), std::string("local"));
+        Json mine = find_by(cols, "uuid", al["parent"].get<std::string>());
+        CHECK_EQ(mine["kind"].get<std::string>(), std::string("recent_imports"));
+        CHECK_EQ(mine["origin"].get<std::string>(), std::string("local"));
+        // A second import goes under the same row of SpektraLab's: one is made, once.
+        touch(root / "New/z.NEF", "z");
+        std::string album2 = c("images.add", {{"library", L}, {"items", {(root / "New/z.NEF").string()}}})["recent_import"];
+        cols = c("collections.list", {{"library", L}})["collections"];
+        CHECK_EQ(find_by(cols, "uuid", album2)["parent"].get<std::string>(), mine["uuid"].get<std::string>());
+        int ours = 0;
+        for (auto& col : cols) if (col["kind"] == "recent_imports" && col["origin"] == "local") ++ours;
+        CHECK_EQ(ours, 1);
+        // A forced sync rewrites Capture One's rows and leaves these as they were.
+        c("library.sync", {{"library", L}, {"force", true}});
+        CHECK_EQ(c("images.list", {{"library", L}, {"collection", album}})["total"].get<int>(), 2);
+        CHECK_EQ(c("images.list", {{"library", L}, {"collection", album2}})["total"].get<int>(), 1);
+        CHECK(!fs::exists(fc.db.string() + "-journal"));
+    });
+
     run("a schema-1 library is migrated forward on open", [] {
         fs::path root = tmpdir("migrate");
         touch(root / "P/a.NEF", "a");
