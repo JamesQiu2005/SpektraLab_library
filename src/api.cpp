@@ -49,6 +49,7 @@ const std::map<std::string, Method>& table() {
         {"edit.delete", {true, true, "remove a variant's edit"}},
         {"meta.set", {true, true, "SpektraLab's rating and/or colour tag on variants (null clears)"}},
         {"images.trash", {true, true, "SpektraLab's trash flag on images (no file is moved)"}},
+        {"images.remove", {true, true, "forget SpektraLab's images whose file is gone (no file is touched)"}},
         {"variant.create", {true, true, "a new SpektraLab variant of an image, optionally copying an edit"}},
         {"images.add", {true, true, "add files to a SpektraLab library, by reference or by copy"}},
         {"collection.create", {true, true, "a SpektraLab album, group, project or smart album"}},
@@ -240,6 +241,7 @@ Json Context::call(const std::string& method, const Json& params_in) {
     if (method == "edit.delete") return l.edit_delete(params);
     if (method == "meta.set") return l.set_meta(params);
     if (method == "images.trash") return l.set_trashed(params);
+    if (method == "images.remove") return l.remove_images(params);
     if (method == "variant.create") return l.variant_create(params);
     if (method == "images.add") return l.add_images(params);
     if (method == "collection.create") return l.collection_create(params);

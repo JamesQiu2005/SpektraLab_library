@@ -119,6 +119,8 @@ std::string kind_for_extension(const std::string& name) {
     if (raw.count(e)) return "raw";
     if (raster.count(e)) return "raster";
     if (movie.count(e)) return "movie";
+    // A half-frame pair's description file (0.3.1). No picture of its own to decode.
+    if (e == "spektrapair") return "pair";
     return "other";
 }
 
@@ -1685,6 +1687,42 @@ Json Library::set_trashed(const Json& params) {
     }
     t.commit();
     return {{"updated", uuids.size()}, {"files_moved", false}};
+}
+
+/// Forget images whose file is gone (0.3.1): the rows, their variants, edits,
+/// keywords and album places. Never a file, and never a row whose file is
+/// still there (`file_present`) or one of Capture One's (`read_only`): what the
+/// app removes this way is a file of its own it has just deleted (a half-frame
+/// pair's), never a photograph.
+Json Library::remove_images(const Json& params) {
+    auto uuids = string_list(params, "images");
+    if (uuids.empty()) throw ApiError("invalid_params", "give 'images'");
+    int64_t removed = 0;
+    Json refused = Json::array();
+    Transaction t(db_);
+    for (auto& u : uuids) {
+        auto s = db_.prepare("SELECT id, origin, location_id, file_name FROM image WHERE uuid = ?");
+        s.bind(1, u);
+        if (!s.step()) { refused.push_back({{"image", u}, {"code", "not_found"}}); continue; }
+        int64_t id = s.i64(0);
+        if (s.text(1) != "local") { refused.push_back({{"image", u}, {"code", "read_only"}}); continue; }
+        std::error_code ec;
+        if (fs::exists(join_path(resolve_location(s.i64(2)), s.text(3)), ec)) {
+            refused.push_back({{"image", u}, {"code", "file_present"}});
+            continue;
+        }
+        for (const char* sql : {"DELETE FROM edit WHERE variant_id IN (SELECT id FROM variant WHERE image_id = ?)",
+                                "DELETE FROM variant_keyword WHERE variant_id IN (SELECT id FROM variant WHERE image_id = ?)",
+                                "DELETE FROM variant WHERE image_id = ?", "DELETE FROM collection_image WHERE image_id = ?",
+                                "DELETE FROM fs_intent WHERE image_id = ?", "DELETE FROM image WHERE id = ?"}) {
+            auto d = db_.prepare(sql);
+            d.bind(1, id);
+            d.run();
+        }
+        ++removed;
+    }
+    t.commit();
+    return {{"removed", removed}, {"refused", refused}, {"files_moved", false}};
 }
 
 Json Library::variant_create(const Json& params) {

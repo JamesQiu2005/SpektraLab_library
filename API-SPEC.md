@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Version** | 0.3.0: `abi` 1, library `schema` 3 (`sdk.version` reports them) |
+| **Version** | 0.3.1: `abi` 1, library `schema` 3 (`sdk.version` reports them) |
 | **Transports** | the C ABI in `include/spklib/spklib.h`, and `spklib-host` over stdio. One method table serves both |
 | **Licence** | MIT, like the rest of this repository |
 | **Used by** | SpektraLab 2.0, which bundles `spklib-host` as a helper; see its `API-SPEC-library-helper.md` for how the app runs its library on this API |
@@ -20,6 +20,11 @@ Recent Imports album per import. A 0.1.0 helper refuses a library a 0.2.0 helper
 copied into a new SpektraLab catalog, and later updated from it: see "Copies" below), `copied_from` in
 `library.info`, `capture_one` values in `image.get` for a copied variant, and `recent_import_at` on
 `images.add`. A 0.2.x helper refuses a library a 0.3.0 helper has opened.
+
+**0.3.1** (schema 3 unchanged, abi still 1: additions only): `images.remove`, which forgets rows whose
+file is gone and never touches a file, and the kind `pair` for a `.spektrapair` (a half-frame pair's
+description file, listed as a row like any picture). A 0.3.0 helper opens the
+same libraries; it calls such a row `other`.
 
 
 One surface, two transports:
@@ -77,6 +82,7 @@ times are UTC (`…Z`).
 | `edit.delete` | L | `variant` | `deleted` | edit |
 | `meta.set` | L | `variants[]` or `images[]` (→ first variant); `rating` 0–5 / null, `color_tag` 0–7 / null | `updated` | overrides |
 | `images.trash` | L | `images[]`, `trashed` true / false / null | `updated`, `files_moved: false` | override |
+| `images.remove` | L | `images[]` | `removed`, `refused[] {image, code}` (`not_found`; `read_only` for Capture One's; `file_present` while the file is still there), `files_moved: false`. The rows go with their variants, edits, keywords and album places (0.3.1) | rows only, never files |
 | `variant.create` | L | `image`, `from_variant`? | `variant`, `position`, `edit_copied` | variant |
 | `images.add` | L | `items[]`: path or `{path, metadata}`; `mode` `reference`/`copy`; `collection`? (a SpektraLab album); `destination`? (relative folder for copies); `recent_import`? (default true); `recent_import_at`? (a UTC ISO 8601 time, `2025-11-05T04:39:00Z` or with an offset; `invalid_params` otherwise; ignored when `recent_import` is false) | `added`, `results[] {path, image, variant, existing, stored_at?, error?}`, `recent_import`? (the new Recent Imports album; in a Capture One mirror it goes under a Recent Imports row of SpektraLab's beside Capture One's, made the first time). With `recent_import_at` the album's `created_at` is that time and its name that time as `yyyy-MM-dd HH:mm` in this Mac's local zone; the albums are numbered (`position`) oldest first and the newest 20 by `created_at` are kept, so old imports added in any order keep the 20 newest. An import older than all 20 kept is trimmed at once and `recent_import` is absent. Without it the album is made now | rows; files only with `copy`, never overwriting |
 | `collection.create` | L | `kind` (album/group/project/smart_album), `name`, `parent`?, `criteria`? (an `images.list` filter) | `collection` | |
@@ -95,7 +101,7 @@ times are UTC (`…Z`).
 | `session.trash.commit` | L | `removed_paths[]` (files the app moved to the macOS Trash) | `dropped`, `refused[]` | rows |
 
 Filter keys: `min_rating`, `max_rating`, `ratings[]` (any of), `color_tags[]`, `kinds[]` (`raw` `raster`
-`movie` `other`), `text` (file or display name), `captured_from`, `captured_to` (`YYYY-MM-DD[THH:MM:SS]`,
+`movie` `pair` `other`; `pair` since 0.3.1), `text` (file or display name), `captured_from`, `captured_to` (`YYYY-MM-DD[THH:MM:SS]`,
 half-open), `camera_model`, `camera_models[]` and `lenses[]` (any of; `null` in the list is "not known"),
 `keywords[]` (any of), `has_edit`, `described`.
 

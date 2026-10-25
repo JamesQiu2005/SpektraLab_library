@@ -968,6 +968,41 @@ static void synthetic() {
         CHECK_EQ(c("library.info", {{"library", L2}})["counts"]["images"].get<int>(), 4);
     });
 
+    run("a half-frame pair's file is a row of kind pair, forgotten only once its file is gone (0.3.1)", [] {
+        fs::path root = tmpdir("pairrow");
+        touch(root / "Shoot/a.NEF", "1");
+        touch(root / "App/Pairs/P1.spektrapair", "{}");
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "Mine").string()}})["library"];
+        std::string album = c("collection.create", {{"library", L}, {"kind", "album"}, {"name", "Roll"}})["collection"];
+        Json add = c("images.add", {{"library", L}, {"recent_import", false}, {"collection", album},
+                                    {"items", {(root / "Shoot/a.NEF").string(),
+                                               {{"path", (root / "App/Pairs/P1.spektrapair").string()},
+                                                {"metadata", {{"captured_local", "2026-10-01T09:30:00"}, {"width", 6000}, {"height", 4000}}}}}}});
+        CHECK_EQ(add["added"].get<int>(), 2);
+        std::string a = add["results"][0]["image"], p = add["results"][1]["image"];
+        CHECK_EQ(c("image.get", {{"library", L}, {"image", p}})["kind"].get<std::string>(), std::string("pair"));
+        CHECK_EQ(c("images.list", {{"library", L}, {"filter", {{"kinds", {"pair"}}}}})["total"].get<int>(), 1);
+        // Still there: refused, and no file is touched.
+        Json r = c("images.remove", {{"library", L}, {"images", {p, a}}});
+        CHECK_EQ(r["removed"].get<int>(), 0);
+        CHECK_EQ(r["refused"].size(), size_t(2));
+        CHECK_EQ(r["refused"][0]["code"].get<std::string>(), std::string("file_present"));
+        CHECK(fs::exists(root / "App/Pairs/P1.spektrapair"));
+        CHECK(fs::exists(root / "Shoot/a.NEF"));
+        // Gone: the row, its variant, its edit and its album place go with it.
+        std::string v = add["results"][1]["variant"];
+        c("edit.put", {{"library", L}, {"variant", v}, {"edit", {{"k", 1}}}, {"base_revision", 0}});
+        fs::remove(root / "App/Pairs/P1.spektrapair");
+        r = c("images.remove", {{"library", L}, {"images", {p, "NO-SUCH"}}});
+        CHECK_EQ(r["removed"].get<int>(), 1);
+        CHECK_EQ(r["refused"][0]["code"].get<std::string>(), std::string("not_found"));
+        CHECK_EQ(c("images.list", {{"library", L}, {"include_removed", true}, {"include_trashed", true}})["total"].get<int>(), 1);
+        CHECK_EQ(find_by(c("collections.list", {{"library", L}})["collections"], "uuid", album)["image_count"].get<int>(), 1);
+        CHECK(!c("images.lookup", {{"library", L}, {"paths", {(root / "App/Pairs/P1.spektrapair").string()}}})["results"][0]["found"].get<bool>());
+        CHECK_EQ(c.err("images.remove", {{"library", L}, {"images", Json::array()}}), std::string("invalid_params"));
+    });
+
     run("relink: a renamed volume is found in one step", [] {
         fs::path root = tmpdir("relink");
         touch(root / "VolA/2026/x.NEF", "1");

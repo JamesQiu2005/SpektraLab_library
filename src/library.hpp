@@ -108,6 +108,8 @@ public:
     Json edit_delete(const Json& params);
     Json set_meta(const Json& params);
     Json set_trashed(const Json& params);
+    /// Forget images whose file is gone; never a file (0.3.1).
+    Json remove_images(const Json& params);
     Json variant_create(const Json& params);
     Json add_images(const Json& params);
     Json collection_create(const Json& params);
