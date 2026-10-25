@@ -19,6 +19,8 @@
 
 #include <memory>
 #include <optional>
+#include <set>
+#include <vector>
 #include <string>
 
 #include "json.hpp"
@@ -35,12 +37,15 @@ struct ApiError : std::runtime_error {
         : std::runtime_error(msg), code(std::move(c)), data(std::move(d)) {}
 };
 
+/// The SQL an images query becomes (library.cpp).
+struct Where;
+
 std::string new_uuid();
 double now_unix();
 
 class Library {
 public:
-    static constexpr int kSchemaVersion = 1;
+    static constexpr int kSchemaVersion = 2;
 
     /// kind is "catalog" (`<path>` is a `.spkcatalog` package) or "session"
     /// (`<path>` is the session folder).
@@ -73,6 +78,11 @@ public:
     Json image(const Json& params);
     Json lookup(const Json& params);
     Json locations(const Json& params);
+    /// Counts per rating, colour tag, kind, capture date, camera, lens,
+    /// keyword and edit state over the scope `images.list` would list. Each
+    /// facet is counted with every filter but its own, so a choice in one
+    /// facet narrows the others and never empties itself.
+    Json facets(const Json& params);
 
     // --- SpektraLab-owned writes ----------------------------------------------------
     Json edit_get(const Json& params);
@@ -88,6 +98,17 @@ public:
     Json collection_add(const Json& params);
     Json collection_remove(const Json& params);
     Json relink_location(const Json& params);
+    /// What the app read of a file's header, for an image a folder sync or
+    /// an add without metadata left undescribed. SpektraLab's rows only.
+    Json describe(const Json& params);
+
+    // --- referenced folders kept in step (SpektraLab catalogs and sessions) -------------
+    /// Watch a folder: its pictures are added by reference, and every
+    /// `folders.sync` notices files that appeared, went or moved inside it.
+    Json folders_add(const Json& params);
+    Json folders_list(const Json& params);
+    Json folders_sync(const Json& params);
+    Json folders_remove(const Json& params);
 
     // --- a SpektraLab session's folders (native sessions only) ------------------------
     Json session_folders(const Json& params);
@@ -102,6 +123,13 @@ public:
 
 private:
     void lock_session();
+    void ensure_system_collections();
+    void require_own_library();
+    void scope(const Json& params, Where& w);
+    std::optional<int64_t> new_recent_import(const std::vector<int64_t>& images);
+    Json sync_tree(const std::string& root, bool recursive, const std::set<std::string>& skip, bool recent_import);
+    Json sync_watched(int64_t watched_id, bool first);
+    std::vector<int64_t> locations_under(const std::string& root, bool recursive);
     void reconcile_intents();
     void require_session();
     std::optional<int64_t> role_location(const std::string& role);

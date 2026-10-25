@@ -203,6 +203,10 @@ struct FakeCatalog {
                " (36, 21, 'COL-F-PHOTOS', NULL, 20, NULL, 3, NULL, NULL, NULL, NULL),"
                " (36, 22, 'COL-F-SUB', NULL, 999, NULL, 4, NULL, NULL, NULL, NULL)");
         d.exec("UPDATE ZCOLLECTION SET ZSMARTCRITERIA = '<rating>5</rating>' WHERE Z_PK = 9");
+        // The import album's time, a UTC instant: 2026-10-04 13:31:37Z.
+        d.exec("UPDATE ZCOLLECTION SET ZDATECREATED = 1791120697 WHERE Z_PK = 7");
+        d.exec("UPDATE ZVARIANTMETADATA SET ZCONTENT_KEYWORDS = 'street, night;Shanghai' WHERE Z_PK = 101");
+        d.exec("UPDATE ZVARIANTMETADATA SET ZCONTENT_KEYWORDS = 'night' WHERE Z_PK = 103");
         d.exec("INSERT INTO ZIMAGEINCOLLECTION (Z_ENT, Z_PK, ZCOLLECTION, ZIMAGE) VALUES"
                " (47, 1, 7, 1), (47, 2, 7, 2), (47, 3, 7, 3), (47, 4, 8, 2), (47, 5, 8, 4),"
                " (47, 6, 21, 1), (47, 7, 21, 2), (47, 8, 21, 3), (47, 9, 22, 4)");
@@ -651,6 +655,225 @@ static void synthetic() {
         CHECK(c("images.lookup", {{"library", L}, {"paths", {(root / nfd / "x.NEF").string()}}})["results"][0]["found"].get<bool>());
     });
 
+    run("a watched folder keeps in step: new, moved, gone, back, offline", [] {
+        fs::path root = tmpdir("watch");
+        touch(root / "Card/DCIM/100/A.NEF", "aaaa");
+        touch(root / "Card/DCIM/100/B.NEF", "bbbbbb");
+        touch(root / "Card/DCIM/101/C.jpg", "cc");
+        touch(root / "Card/DCIM/101/notes.txt", "not a picture");
+        touch(root / "Card/.Trashes/D.NEF", "hidden");
+        touch(root / "Card/CaptureOne/Cache/E.jpg", "a cache");
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "W").string()}})["library"];
+        Json fa = c("folders.add", {{"library", L}, {"path", (root / "Card").string()}, {"skip", {"CaptureOne"}}});
+        CHECK_EQ(fa["sync"]["added"].get<int>(), 3);
+        CHECK_EQ(fa["sync"]["offline"].get<bool>(), false);
+        CHECK(fa["sync"].contains("recent_import"));  // the first look is an import
+        std::string a = find_by(c("images.list", {{"library", L}})["images"], "file_name", "A.NEF")["uuid"];
+        c("meta.set", {{"library", L}, {"images", {a}}, {"rating", 4}});
+
+        // Nothing changed: nothing reported.
+        Json s0 = c("folders.sync", {{"library", L}});
+        CHECK_EQ(s0["folders"][0]["unchanged"].get<int>(), 3);
+        CHECK_EQ(s0["added"].get<int>() + s0["moved"].get<int>() + s0["removed"].get<int>(), 0);
+
+        // Finder: A moves to another folder, B is deleted, F arrives.
+        fs::create_directories(root / "Card/DCIM/102");
+        fs::rename(root / "Card/DCIM/100/A.NEF", root / "Card/DCIM/102/A.NEF");
+        fs::remove(root / "Card/DCIM/100/B.NEF");
+        touch(root / "Card/DCIM/101/F.NEF", "ffff");
+        Json s1 = c("folders.sync", {{"library", L}});
+        CHECK_EQ(s1["moved"].get<int>(), 1);
+        CHECK_EQ(s1["removed"].get<int>(), 1);
+        CHECK_EQ(s1["added"].get<int>(), 1);
+        CHECK(!s1["folders"][0].contains("recent_import"));  // a later sync is not an import
+        // The row followed the file: same image, same rating.
+        Json ai = c("image.get", {{"library", L}, {"image", a}});
+        CHECK_EQ(ai["path"].get<std::string>(), (root / "Card/DCIM/102/A.NEF").string());
+        CHECK_EQ(ai["variants"][0]["rating"].get<int>(), 4);
+        CHECK_EQ(c("images.list", {{"library", L}})["total"].get<int>(), 3);
+        Json removed = c("images.list", {{"library", L}, {"include_removed", true}})["images"];
+        CHECK_EQ(find_by(removed, "file_name", "B.NEF")["origin_state"].get<std::string>(), std::string("removed"));
+
+        // B comes back: the same row, present again.
+        touch(root / "Card/DCIM/100/B.NEF", "bbbbbb");
+        Json s2 = c("folders.sync", {{"library", L}});
+        CHECK_EQ(s2["restored"].get<int>(), 1);
+        CHECK_EQ(s2["added"].get<int>(), 0);
+        CHECK_EQ(c("images.list", {{"library", L}})["total"].get<int>(), 4);
+
+        // The card is ejected: offline, nothing marked.
+        fs::rename(root / "Card", root / "Card-away");
+        Json s3 = c("folders.sync", {{"library", L}});
+        CHECK(s3["folders"][0]["offline"].get<bool>());
+        CHECK_EQ(c("images.list", {{"library", L}})["total"].get<int>(), 4);
+        Json fl = c("folders.list", {{"library", L}})["folders"];
+        CHECK_EQ(fl.size(), size_t(1));
+        CHECK(!fl[0]["online"].get<bool>());
+        CHECK_EQ(fl[0]["image_count"].get<int>(), 4);
+        fs::rename(root / "Card-away", root / "Card");
+
+        // Two files of one name and size went and one came: not a move.
+        touch(root / "Card/X/G.NEF", "gg");
+        touch(root / "Card/Y/G.NEF", "gg");
+        c("folders.sync", {{"library", L}});
+        fs::create_directories(root / "Card/Z");
+        fs::rename(root / "Card/X/G.NEF", root / "Card/Z/G.NEF");
+        fs::remove(root / "Card/Y/G.NEF");
+        Json s4 = c("folders.sync", {{"library", L}});
+        CHECK_EQ(s4["moved"].get<int>(), 0);
+        CHECK_EQ(s4["added"].get<int>(), 1);
+        CHECK_EQ(s4["removed"].get<int>(), 2);
+
+        // The folder's tree is collections, by kind.
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        CHECK(!find_by(cols, "title", "Card").is_null());
+        CHECK(!find_by(cols, "title", "102").is_null());
+        CHECK(find_by(cols, "title", "CaptureOne").is_null());
+        CHECK_EQ(c.err("folders.add", {{"library", L}, {"path", (root / "W.spkcatalog/Originals").string()}}), std::string("not_found"));
+        CHECK_EQ(c.err("folders.add", {{"library", L}, {"path", (root / "W.spkcatalog").string()}}), std::string("invalid_params"));
+        c("folders.remove", {{"library", L}, {"folder", fl[0]["folder"]}});
+        CHECK_EQ(c("folders.list", {{"library", L}})["folders"].size(), size_t(0));
+        CHECK_EQ(c("images.list", {{"library", L}})["total"].get<int>(), 5);  // the images stay
+    });
+
+    run("a session keeps its own folder in step", [] {
+        fs::path root = tmpdir("watch-session");
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "S").string()}, {"kind", "session"}})["library"];
+        touch(root / "S/Capture/A.NEF", "a");
+        touch(root / "S/Selects/B.NEF", "b");
+        Json s = c("folders.sync", {{"library", L}});
+        CHECK_EQ(s["session"]["added"].get<int>(), 2);
+        fs::rename(root / "S/Capture/A.NEF", root / "S/Selects/A.NEF");
+        CHECK_EQ(c("folders.sync", {{"library", L}})["session"]["moved"].get<int>(), 1);
+        // A session's library has the fixed rows but no "In Catalog".
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        CHECK(!find_by(cols, "kind", "all_images").is_null());
+        CHECK(find_by(cols, "kind", "in_library").is_null());
+    });
+
+    run("a Capture One mirror's folders are Capture One's", [] {
+        fs::path root = tmpdir("watch-c1");
+        FakeCatalog fc(root);
+        Ctx c;
+        std::string L = c("capture_one.link", {{"source", fc.package.string()}, {"path", (root / "M").string()}})["library"];
+        CHECK_EQ(c.err("folders.add", {{"library", L}, {"path", fc.photos.string()}}), std::string("read_only"));
+        CHECK_EQ(c.err("folders.sync", {{"library", L}}), std::string("read_only"));
+        // Its tree is Capture One's only: one root, no SpektraLab rows beside it.
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        int roots = 0;
+        for (auto& col : cols) roots += col["kind"] == "root";
+        CHECK_EQ(roots, 1);
+        // A Recent Imports album carries Capture One's own time.
+        CHECK_EQ(find_by(cols, "uuid", "COL-IMPORT")["created_at"].get<std::string>(), std::string("2026-10-04T13:31:37Z"));
+        // A folder without a name is called by its own.
+        CHECK_EQ(find_by(cols, "uuid", "COL-F-SUB")["title"].get<std::string>(), std::string("Sub"));
+        CHECK(!find_by(cols, "uuid", "COL-PICKS")["editable"].get<bool>());
+    });
+
+    run("facets count each facet without its own filter", [] {
+        fs::path root = tmpdir("facets");
+        FakeCatalog fc(root);
+        Ctx c;
+        std::string L = c("capture_one.link", {{"source", fc.package.string()}, {"path", (root / "M").string()}})["library"];
+        Json f = c("images.facets", {{"library", L}});
+        // Four visible images (C is in Capture One's trash).
+        CHECK_EQ(f["total"].get<int>(), 4);
+        std::map<int64_t, int64_t> rating;
+        for (auto& r : f["rating"]) rating[r["value"].get<int64_t>()] = r["count"].get<int64_t>();
+        // Primary variants: A 0, B 3, D 1, E 0.
+        CHECK_EQ(rating[0], int64_t(2));
+        CHECK_EQ(rating[3], int64_t(1));
+        CHECK_EQ(rating[1], int64_t(1));
+        CHECK_EQ(find_by(f["camera"], "value", "NIKON Z6_3")["count"].get<int>(), 2);
+        CHECK_EQ(f["captured"]["undated"].get<int>(), 1);
+        CHECK_EQ(find_by(f["captured"]["days"], "value", "2024-01-08")["count"].get<int>(), 3);
+        CHECK_EQ(find_by(f["keyword"], "value", "night")["count"].get<int>(), 2);
+        CHECK_EQ(find_by(f["keyword"], "value", "Shanghai")["count"].get<int>(), 1);
+        // Ticking 3 stars: the total narrows, the rating facet does not, the camera facet does.
+        Json g = c("images.facets", {{"library", L}, {"filter", {{"ratings", {3}}}}});
+        CHECK_EQ(g["total"].get<int>(), 1);
+        CHECK_EQ(g["rating"].size(), f["rating"].size());
+        CHECK_EQ(g["camera"].size(), size_t(1));
+        // The new filter keys list the same images the facets counted.
+        CHECK_EQ(c("images.list", {{"library", L}, {"filter", {{"keywords", {"night"}}}}})["total"].get<int>(), 2);
+        CHECK_EQ(c("images.list", {{"library", L}, {"filter", {{"camera_models", {"ILCE-7RM5", nullptr}}}}})["total"].get<int>(), 2);
+        CHECK_EQ(c("images.list", {{"library", L}, {"filter", {{"ratings", {0, 1}}}}})["total"].get<int>(), 3);
+        // Scoped to a collection, as the browser asks.
+        CHECK_EQ(c("images.facets", {{"library", L}, {"collection", "COL-PICKS"}})["total"].get<int>(), 2);
+    });
+
+    run("describe: the app's header reading fills SpektraLab's rows only", [] {
+        fs::path root = tmpdir("describe");
+        touch(root / "P/A.NEF", "a");
+        FakeCatalog fc(root);
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "D").string()}})["library"];
+        Json fa = c("folders.add", {{"library", L}, {"path", (root / "P").string()}});
+        Json f0 = c("images.facets", {{"library", L}});
+        CHECK_EQ(f0["undescribed"].get<int>(), 1);
+        std::string a = c("images.list", {{"library", L}, {"filter", {{"described", false}}}})["images"][0]["uuid"];
+        Json d = c("images.describe", {{"library", L}, {"items", {{{"image", a}, {"metadata", {{"captured_local", "2026-10-03T16:53:00"},
+                                                                                            {"camera_model", "NIKON Z 8"}, {"lens", "NIKKOR Z 24-120mm f/4 S"}}}}}}});
+        CHECK_EQ(d["updated"].get<int>(), 1);
+        Json f1 = c("images.facets", {{"library", L}});
+        CHECK_EQ(f1["undescribed"].get<int>(), 0);
+        CHECK_EQ(find_by(f1["lens"], "value", "NIKKOR Z 24-120mm f/4 S")["count"].get<int>(), 1);
+        CHECK_EQ(c("images.list", {{"library", L}, {"full", true}})["images"][0]["captured_local"].get<std::string>(), std::string("2026-10-03T16:53:00"));
+        std::string M = c("capture_one.link", {{"source", fc.package.string()}, {"path", (root / "M").string()}})["library"];
+        Json r = c("images.describe", {{"library", M}, {"items", {{{"image", "IMG-A"}, {"metadata", {{"lens", "x"}}}}}}});
+        CHECK_EQ(r["updated"].get<int>(), 0);
+        CHECK_EQ(r["results"][0]["error"]["code"].get<std::string>(), std::string("read_only"));
+    });
+
+    run("each import is a Recent Imports album", [] {
+        fs::path root = tmpdir("recent");
+        touch(root / "a.NEF", "a");
+        touch(root / "b.NEF", "b");
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "R").string()}})["library"];
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        Json ri = find_by(cols, "kind", "recent_imports");
+        CHECK(!ri.is_null());
+        CHECK(!ri["editable"].get<bool>());
+        Json add = c("images.add", {{"library", L}, {"items", {(root / "a.NEF").string(), (root / "b.NEF").string()}}});
+        std::string album = add["recent_import"];
+        cols = c("collections.list", {{"library", L}})["collections"];
+        Json al = find_by(cols, "uuid", album);
+        CHECK_EQ(al["parent"].get<std::string>(), ri["uuid"].get<std::string>());
+        CHECK_EQ(al["image_count"].get<int>(), 2);
+        CHECK_EQ(find_by(cols, "kind", "recent_imports")["image_count"].get<int>(), 2);
+        CHECK_EQ(c("images.list", {{"library", L}, {"collection", album}})["total"].get<int>(), 2);
+        // Adding the same files again is no import.
+        CHECK(!c("images.add", {{"library", L}, {"items", {(root / "a.NEF").string()}}}).contains("recent_import"));
+    });
+
+    run("a schema-1 library is migrated forward on open", [] {
+        fs::path root = tmpdir("migrate");
+        touch(root / "P/a.NEF", "a");
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "Old").string()}})["library"];
+        c("images.add", {{"library", L}, {"items", {(root / "P/a.NEF").string()}}, {"recent_import", false}});
+        c("library.close", {{"library", L}});
+        {
+            // Back to what spklib 0.1.0 wrote: schema 1, no fixed rows.
+            Db d((root / "Old.spkcatalog/Library.spkdb").string(), Db::Mode::ReadWrite);
+            d.exec("DROP INDEX image_captured; DROP INDEX variant_keyword_keyword; DROP TABLE variant_keyword; DROP TABLE watched_folder;"
+                   " ALTER TABLE collection DROP COLUMN origin_created_at; ALTER TABLE image DROP COLUMN described_at;"
+                   " DELETE FROM collection WHERE kind IN ('root', 'all_images', 'recent_imports', 'trash', 'in_library');"
+                   " UPDATE meta SET value = '1' WHERE key = 'schema_version'");
+        }
+        std::string L2 = c("library.open", {{"path", (root / "Old.spkcatalog").string()}})["library"];
+        CHECK_EQ(c("library.info", {{"library", L2}})["schema_version"].get<int>(), 2);
+        Json cols = c("collections.list", {{"library", L2}})["collections"];
+        CHECK(!find_by(cols, "kind", "all_images").is_null());
+        CHECK_EQ(find_by(cols, "kind", "all_images")["image_count"].get<int>(), 1);
+        CHECK_EQ(c("images.facets", {{"library", L2}})["total"].get<int>(), 1);
+        c("folders.add", {{"library", L2}, {"path", (root / "P").string()}});
+        CHECK_EQ(c("images.list", {{"library", L2}})["total"].get<int>(), 1);  // the same file, not twice
+    });
+
     run("the method table and the version", [] {
         Ctx c;
         Json v = c("sdk.version");
@@ -792,6 +1015,81 @@ static void real_catalog(const std::string& package) {
         }
         CHECK_EQ(roots, 1);
         CHECK_EQ(folders_without_parent, 0);
+    });
+
+    run("Recent Imports: each album's time and count are Capture One's", [&] {
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        auto s = o.prepare("SELECT c.ZUUID, strftime('%Y-%m-%dT%H:%M:%SZ', c.ZDATECREATED, 'unixepoch'), c.ZNAME,"
+                           " (SELECT count(*) FROM ZIMAGEINCOLLECTION ic JOIN ZIMAGE i ON i.Z_PK = ic.ZIMAGE"
+                           "  WHERE ic.ZCOLLECTION = c.Z_PK AND i.ZISTRASHED = 0)"
+                           " FROM ZCOLLECTION c WHERE c.ZPARENT = (SELECT ZLASTIMPORTSCOLLECTION FROM ZCOLLECTION"
+                           "  WHERE Z_PK = (SELECT ZROOTCOLLECTION FROM ZDOCUMENTCONTENT))");
+        int64_t n = 0, bad = 0;
+        while (s.step()) {
+            ++n;
+            Json col = find_by(cols, "uuid", s.text(0));
+            if (col.is_null() || col["created_at"] != s.text(1) || col["image_count"] != s.i64(3) || col["title"] != s.text(2)) {
+                ++bad;
+                std::fprintf(stderr, "   recent import %s: %s\n", s.text(2).c_str(), col.dump().c_str());
+            }
+            if (n <= 3) std::printf("   %s · %lld (%s)\n", s.text(2).c_str(), (long long)s.i64(3), s.text(1).c_str());
+        }
+        std::printf("   recent imports checked %lld\n", (long long)n);
+        CHECK(n > 0);
+        CHECK_EQ(bad, int64_t(0));
+    });
+
+    run("facets agree with an independent count", [&] {
+        auto a = std::chrono::steady_clock::now();
+        Json f = c("images.facets", {{"library", L}});
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
+        auto n = [&](const std::string& sql) { auto s = o.prepare(sql); s.step(); return s.i64(0); };
+        int64_t visible = n("SELECT count(*) FROM ZIMAGE WHERE ZISTRASHED = 0");
+        CHECK_EQ(f["total"].get<int64_t>(), visible);
+        // The first variant's rating, as images.list shows it.
+        auto rs = o.prepare("SELECT COALESCE(m.ZBASIC_RATING, 0), count(*) FROM ZIMAGE i"
+                            " JOIN ZVARIANT v ON v.Z_PK = (SELECT Z_PK FROM ZVARIANT WHERE ZIMAGE = i.Z_PK ORDER BY ZINDEX, Z_PK LIMIT 1)"
+                            " LEFT JOIN ZVARIANTLAYER l ON l.Z_PK = v.ZCOMBINEDSETTINGS LEFT JOIN ZVARIANTMETADATA m ON m.ZLAYER = l.Z_PK"
+                            " WHERE i.ZISTRASHED = 0 GROUP BY 1");
+        int64_t bad = 0;
+        while (rs.step()) {
+            int64_t got = 0;
+            for (auto& r : f["rating"]) if (r["value"].get<int64_t>() == rs.i64(0)) got = r["count"].get<int64_t>();
+            if (got != rs.i64(1)) { ++bad; std::fprintf(stderr, "   rating %lld: sdk %lld, oracle %lld\n", (long long)rs.i64(0), (long long)got, (long long)rs.i64(1)); }
+        }
+        CHECK_EQ(bad, int64_t(0));
+        int64_t cams = 0, days = 0;
+        for (auto& x : f["camera"]) cams += x["count"].get<int64_t>();
+        for (auto& x : f["captured"]["days"]) days += x["count"].get<int64_t>();
+        CHECK_EQ(cams, visible);
+        CHECK_EQ(days + f["captured"]["undated"].get<int64_t>(), visible);
+        CHECK_EQ(find_by(f["camera"], "value", "NIKON Z 8").is_null() ? int64_t(-1) : find_by(f["camera"], "value", "NIKON Z 8")["count"].get<int64_t>(),
+                 n("SELECT count(*) FROM ZIMAGE WHERE ZISTRASHED = 0 AND ZCAMERA_MODEL = 'NIKON Z 8'"));
+        std::printf("   facets in %.0f ms: %zu ratings, %zu cameras, %zu lenses, %zu days, %zu keywords\n", ms, f["rating"].size(),
+                    f["camera"].size(), f["lens"].size(), f["captured"]["days"].size(), f["keyword"].size());
+    });
+
+    run("timings: every image, and one collection", [&] {
+        auto t = [&](const char* what, const Json& p) {
+            auto a = std::chrono::steady_clock::now();
+            Json r = c("images.list", p);
+            std::printf("   %s: %zu of %lld in %.0f ms\n", what, r["images"].size(), (long long)r["total"].get<int64_t>(),
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
+            return r;
+        };
+        Json all = t("all images, sorted by capture", {{"library", L}});
+        t("all images, full rows", {{"library", L}, {"full", true}});
+        t("all images, full rows, files checked", {{"library", L}, {"full", true}, {"check_files", true}});
+        t("first page of 200, by name", {{"library", L}, {"sort", "name"}, {"limit", 200}, {"full", true}});
+        auto s = o.prepare("SELECT c.ZUUID FROM ZCOLLECTION c ORDER BY (SELECT count(*) FROM ZIMAGEINCOLLECTION WHERE ZCOLLECTION = c.Z_PK) DESC LIMIT 1");
+        s.step();
+        std::string big = s.text(0);
+        t("the largest collection, full rows", {{"library", L}, {"collection", big}, {"full", true}});
+        auto a = std::chrono::steady_clock::now();
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        std::printf("   collections.list: %zu in %.0f ms\n", cols.size(),
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
+        CHECK(all["total"].get<int64_t>() > 0);
     });
 
     run("every path in the catalog is found by lookup", [&] {

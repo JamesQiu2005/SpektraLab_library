@@ -38,6 +38,8 @@ const std::map<std::string, Method>& table() {
         {"images.list", {true, false, "images in a collection or the whole library, filtered, sorted, paged"}},
         {"images.lookup", {true, false, "find images by absolute path"}},
         {"image.get", {true, false, "one image with every variant, its origin values and SpektraLab's"}},
+        {"images.facets", {true, false, "counts per rating, colour tag, kind, date, camera, lens, keyword, edit state over a scope"}},
+        {"images.describe", {true, true, "what the app read of a file's header, for SpektraLab's undescribed images"}},
         {"locations.list", {true, false, "every folder location, resolved, with online state"}},
         {"location.relink", {true, true, "point an offline location at a new root (SpektraLab-side only)"}},
         {"edit.get", {true, false, "a variant's SpektraLab edit JSON and revision"}},
@@ -52,6 +54,10 @@ const std::map<std::string, Method>& table() {
         {"collection.delete", {true, true, "delete a SpektraLab collection (never images)"}},
         {"collection.add", {true, true, "add images to a SpektraLab album"}},
         {"collection.remove", {true, true, "remove images from a SpektraLab album"}},
+        {"folders.add", {true, true, "watch a referenced folder: add its pictures and keep them in step (SpektraLab libraries)"}},
+        {"folders.list", {true, false, "the watched folders, online, counts and last sync"}},
+        {"folders.sync", {true, true, "notice files that appeared, went or moved in watched folders (and a session's own)"}},
+        {"folders.remove", {true, true, "stop watching a folder (its images stay)"}},
         {"session.folders", {true, false, "a session's folders, their roles and counts"}},
         {"session.scan", {true, true, "add files that appeared in a SpektraLab session's folders"}},
         {"session.move", {true, true, "move images to Selects, Trash, Capture or a folder (SpektraLab sessions only; moves files)"}},
@@ -156,7 +162,9 @@ Json Context::call(const std::string& method, const Json& params_in) {
             o["source"] = located.package;
             report = lib->sync(o);
         } else {
-            lib = Library::create(path, "catalog", params);
+            Json o = params;
+            o["mirror"] = true;  // Capture One's tree, not SpektraLab's own rows
+            lib = Library::create(path, "catalog", o);
             try {
                 report = lib->link_capture_one(source, params);
             } catch (...) {
@@ -199,6 +207,12 @@ Json Context::call(const std::string& method, const Json& params_in) {
     if (method == "images.list") return l.images(params);
     if (method == "images.lookup") return l.lookup(params);
     if (method == "image.get") return l.image(params);
+    if (method == "images.facets") return l.facets(params);
+    if (method == "images.describe") return l.describe(params);
+    if (method == "folders.add") return l.folders_add(params);
+    if (method == "folders.list") return l.folders_list(params);
+    if (method == "folders.sync") return l.folders_sync(params);
+    if (method == "folders.remove") return l.folders_remove(params);
     if (method == "locations.list") return l.locations(params);
     if (method == "location.relink") return l.relink_location(params);
     if (method == "edit.get") return l.edit_get(params);

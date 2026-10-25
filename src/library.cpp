@@ -275,6 +275,70 @@ CREATE TABLE fs_intent(
   at REAL NOT NULL);
 )SQL";
 
+/// Schema 1 -> 2 (spklib 0.2.0), run on a new library after kSchema and on an
+/// old one when it is opened:
+///  - `collection.origin_created_at`: Capture One's ZDATECREATED (a Recent
+///    Imports album's import time);
+///  - `image.described_at`: when the app said what the file's header holds
+///    (`images.describe`). NULL is a file a folder sync found and nobody has
+///    read yet; the helper never opens an image itself;
+///  - `watched_folder`: referenced folders kept in step by `folders.sync`;
+///  - `variant_keyword`: keywords as rows, for the keyword facet and filter.
+///    Capture One's come from ZCONTENT_KEYWORDS, split.
+const char* kSchema2 = R"SQL(
+ALTER TABLE collection ADD COLUMN origin_created_at REAL;
+ALTER TABLE image ADD COLUMN described_at REAL;
+UPDATE image SET described_at = added_at
+  WHERE origin = 'capture_one' OR captured_local IS NOT NULL OR width IS NOT NULL OR camera_model IS NOT NULL;
+CREATE TABLE watched_folder(
+  id INTEGER PRIMARY KEY,
+  uuid TEXT NOT NULL UNIQUE,
+  location_id INTEGER NOT NULL UNIQUE REFERENCES path_location(id),
+  recursive INTEGER NOT NULL DEFAULT 1,
+  skip TEXT,
+  added_at REAL NOT NULL,
+  synced_at REAL,
+  last_report TEXT);
+CREATE TABLE variant_keyword(
+  variant_id INTEGER NOT NULL REFERENCES variant(id),
+  keyword TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT 'local',
+  PRIMARY KEY (variant_id, keyword, origin));
+CREATE INDEX variant_keyword_keyword ON variant_keyword(keyword, variant_id);
+CREATE INDEX image_captured ON image(captured_local);
+)SQL";
+
+/// Capture One's ZCONTENT_KEYWORDS as separate keywords. The separator is not
+/// documented and no catalog at hand uses one: commas,
+/// semicolons and line breaks all split, a hierarchy's '|' does not.
+std::vector<std::string> split_keywords(const std::string& text) {
+    std::vector<std::string> out;
+    std::string cur;
+    auto flush = [&] {
+        size_t a = cur.find_first_not_of(" \t"), b = cur.find_last_not_of(" \t");
+        if (a != std::string::npos) {
+            std::string k = cur.substr(a, b - a + 1);
+            if (std::find(out.begin(), out.end(), k) == out.end()) out.push_back(k);
+        }
+        cur.clear();
+    };
+    for (char c : text) {
+        if (c == ',' || c == ';' || c == '\n' || c == '\r') flush();
+        else cur += c;
+    }
+    flush();
+    return out;
+}
+
+/// A folder the walk does not go into: another library, or a photo
+/// application's package. Their pictures are theirs.
+bool is_library_package(const fs::path& p) {
+    std::string e = p.extension().string();
+    for (auto& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return e == ".cocatalog" || e == ".spkcatalog" || e == ".photoslibrary" || e == ".lrlibrary" || e == ".lrdata" ||
+           e == ".app" || e == ".aplibrary" || e == ".migratedphotolibrary";
+}
+
 // --- upserting origin rows ---------------------------------------------------------------
 
 using Val = std::variant<std::monostate, int64_t, double, std::string>;
@@ -459,6 +523,7 @@ std::unique_ptr<Library> Library::create(const std::string& path_in, const std::
     {
         Transaction t(lib->db_);
         lib->db_.exec(kSchema);
+        lib->db_.exec(kSchema2);
         std::string name = options.is_object() && options.contains("name") && options["name"].is_string()
                                ? options["name"].get<std::string>()
                                : p.stem().string();
@@ -469,6 +534,9 @@ std::unique_ptr<Library> Library::create(const std::string& path_in, const std::
         lib->set_meta_value("name", name);
         lib->set_meta_value("created_at", std::to_string(now_unix()));
         lib->set_meta_value("origin_kind", "none");
+        // A Capture One mirror takes its tree from Capture One (`capture_one.link`
+        // creates it with `mirror`); SpektraLab's own library has its own.
+        if (!(options.is_object() && options.value("mirror", false))) lib->ensure_system_collections();
         t.commit();
     }
     if (kind == "session") {
@@ -541,7 +609,42 @@ void Library::migrate() {
     if (v > kSchemaVersion)
         throw ApiError("unsupported", "library schema " + std::to_string(v) + " is newer than this SDK (" +
                                           std::to_string(kSchemaVersion) + ")");
-    // Schema 1 is the first; later versions add their steps here.
+    if (v < 2) {
+        Transaction t(db_);
+        db_.exec(kSchema2);
+        set_meta_value("schema_version", "2");
+        if (meta("origin_kind", "none") == "none") ensure_system_collections();
+        t.commit();
+    }
+}
+
+void Library::ensure_system_collections() {
+    // The Library tool's fixed rows, as a Capture One catalog has them: a
+    // root, All Images, Recent Imports (each import an album under it),
+    // Trash, and in a catalog "In Catalog" (files stored inside it). Their
+    // role is their kind; the names are English placeholders the app
+    // replaces with its own words.
+    auto has = db_.prepare("SELECT id FROM collection WHERE kind = 'root' AND origin = 'local'");
+    if (has.step()) return;
+    double now = now_unix();
+    auto ins = db_.prepare("INSERT INTO collection(uuid, parent_id, kind, name, position, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+    ins.bind(1, new_uuid()).bind(2, nullptr).bind(3, "root").bind(4, "root").bind(5, int64_t(0)).bind(6, now);
+    ins.run();
+    int64_t root = db_.last_insert_id();
+    std::vector<std::pair<const char*, const char*>> rows = {
+        {"all_images", "All Images"}, {"recent_imports", "Recent Imports"}, {"trash", "Trash"}};
+    if (kind_ == "catalog") rows.push_back({"in_library", "In Catalog"});
+    int64_t pos = 1;
+    for (auto& [k, n] : rows) {
+        ins.reset();
+        ins.bind(1, new_uuid()).bind(2, root).bind(3, k).bind(4, n).bind(5, pos++).bind(6, now);
+        ins.run();
+    }
+}
+
+void Library::require_own_library() {
+    if (meta("origin_kind", "none") != "none")
+        throw ApiError("read_only", "this library mirrors a Capture One catalog; its folders are Capture One's");
 }
 
 std::string Library::meta(const std::string& key, const std::string& fallback) {
@@ -726,6 +829,7 @@ Json Library::sync(const Json& options) {
 
         Tally tv;
         seen.clear();
+        std::vector<std::pair<int64_t, std::string>> variant_keywords;
         {
             Upserter up(db_, "variant",
                         {"image_id", "position", "origin_rating", "origin_color_tag", "origin_meta", "origin_geometry",
@@ -741,10 +845,23 @@ Json Library::sync(const Json& options) {
                                        {Val(now)});
                 tv.note(st);
                 seen.insert(id);
+                if (va.meta.contains("keywords") && va.meta["keywords"].is_string())
+                    variant_keywords.emplace_back(id, va.meta["keywords"].get<std::string>());
             }
         }
         tv.removed = mark_removed(db_, "variant", seen);
         report["variants"] = tv.to_json();
+
+        // Keywords are Capture One's, so they are replaced whole, as rows
+        // the keyword facet and filter can count.
+        db_.exec("DELETE FROM variant_keyword WHERE origin = 'capture_one'");
+        {
+            auto ins = db_.prepare("INSERT OR IGNORE INTO variant_keyword(variant_id, keyword, origin) VALUES (?, ?, 'capture_one')");
+            int64_t n = 0;
+            for (auto& [vid, text] : variant_keywords)
+                for (auto& k : split_keywords(text)) { ins.bind(1, vid).bind(2, k); ins.run(); ++n; }
+            report["variant_keywords"] = n;
+        }
 
         // Collections, then their parents once every row has an id.
         Tally tc;
@@ -756,7 +873,8 @@ Json Library::sync(const Json& options) {
         // row's pointers and the entity, never from the name.
         {
             Upserter up(db_, "collection",
-                        {"kind", "name", "position", "folder_location_id", "criteria", "criteria_format", "origin_entity"},
+                        {"kind", "name", "position", "folder_location_id", "criteria", "criteria_format", "origin_entity",
+                         "origin_created_at"},
                         {"created_at"});
             for (auto& co : cat.collections) {
                 by_pk[co.pk] = &co;
@@ -771,7 +889,8 @@ Json Library::sync(const Json& options) {
                 }
                 auto [id, st] = up.put(co.uuid, co.uuid,
                                        {v(kind), v(co.name), v(co.position), v(folder), v(co.smart_criteria),
-                                        co.smart_criteria ? Val(std::string("capture_one")) : Val(), v(co.entity)},
+                                        co.smart_criteria ? Val(std::string("capture_one")) : Val(), v(co.entity),
+                                        v(co.created_at)},
                                        {Val(now)});
                 tc.note(st);
                 col_id[co.pk] = id;
@@ -887,16 +1006,16 @@ Json Library::sync(const Json& options) {
 
 // --- reading ---------------------------------------------------------------------------------
 
-namespace {
-
-/// The parts of an images query that become SQL. Shared by `images` and by
-/// a SpektraLab smart album, which is a saved filter.
+/// The parts of an images query that become SQL. Shared by `images`, by
+/// `images.facets` and by a SpektraLab smart album, which is a saved filter.
 struct Where {
     std::string sql = "1";
     std::vector<Val> binds;
     void add(const std::string& clause) { sql += " AND (" + clause + ")"; }
     void add(const std::string& clause, Val b) { add(clause); binds.push_back(std::move(b)); }
 };
+
+namespace {
 
 const char* kPrimary =
     "LEFT JOIN variant pv ON pv.id = (SELECT id FROM variant WHERE image_id = i.id AND origin_state = 'present'"
@@ -940,6 +1059,39 @@ void apply_filter(Where& w, const Json& f) {
         w.add("i.captured_local < ?", Val(*t));
     }
     if (f.contains("camera_model") && f["camera_model"].is_string()) w.add("i.camera_model = ?", Val(f["camera_model"].get<std::string>()));
+    // Any of several values, as a facet's ticks are. A null in the list is
+    // "not known" (a file with no camera in its header).
+    auto any_of = [&](const char* key, const std::string& column) {
+        if (!f.contains(key) || !f[key].is_array() || f[key].empty()) return;
+        std::string in, clause;
+        bool null = false;
+        for (auto& x : f[key]) {
+            if (x.is_null()) { null = true; continue; }
+            if (!x.is_string()) throw ApiError("invalid_params", std::string("'") + key + "' must hold strings or null");
+            in += in.empty() ? "?" : ",?";
+            w.binds.push_back(Val(x.get<std::string>()));
+        }
+        if (!in.empty()) clause = column + " IN (" + in + ")";
+        if (null) clause += std::string(clause.empty() ? "" : " OR ") + column + " IS NULL";
+        w.add(clause);
+    };
+    any_of("camera_models", "i.camera_model");
+    any_of("lenses", "i.lens");
+    if (f.contains("ratings") && f["ratings"].is_array() && !f["ratings"].empty()) {
+        std::string in;
+        for (auto& r : f["ratings"]) in += (in.empty() ? "" : ",") + std::to_string(r.get<int64_t>());
+        w.add(std::string(kRating) + " IN (" + in + ")");
+    }
+    if (f.contains("keywords") && f["keywords"].is_array() && !f["keywords"].empty()) {
+        std::string in;
+        for (auto& k : f["keywords"]) {
+            in += in.empty() ? "?" : ",?";
+            w.binds.push_back(Val(k.get<std::string>()));
+        }
+        w.add("EXISTS (SELECT 1 FROM variant_keyword vk WHERE vk.variant_id = pv.id AND vk.keyword IN (" + in + "))");
+    }
+    if (f.contains("described") && f["described"].is_boolean())
+        w.add(std::string("i.described_at IS ") + (f["described"].get<bool>() ? "NOT NULL" : "NULL"));
     if (f.contains("has_edit") && f["has_edit"].is_boolean())
         w.add(std::string(f["has_edit"].get<bool>() ? "" : "NOT ") +
               "EXISTS (SELECT 1 FROM edit e JOIN variant ev ON ev.id = e.variant_id WHERE ev.image_id = i.id)");
@@ -978,14 +1130,16 @@ Json Library::collections(const Json& params) {
         std::string uuid, kind, name, origin, state;
         std::optional<int64_t> position, folder;
         std::optional<std::string> criteria, criteria_format, entity;
+        double created_at;
     };
     std::vector<Row> rows;
     {
         auto s = db_.prepare("SELECT id, parent_id, uuid, kind, name, origin, origin_state, position, folder_location_id,"
-                             " criteria, criteria_format, origin_entity FROM collection ORDER BY parent_id, position, name");
+                             " criteria, criteria_format, origin_entity, COALESCE(origin_created_at, created_at)"
+                             " FROM collection ORDER BY parent_id, position, name");
         while (s.step()) {
             Row r{s.i64(0), s.opt_i64(1), s.text(2), s.text(3), s.text(4), s.text(5), s.text(6), s.opt_i64(7),
-                  s.opt_i64(8), s.opt_text(9), s.opt_text(10), s.opt_text(11)};
+                  s.opt_i64(8), s.opt_text(9), s.opt_text(10), s.opt_text(11), s.f64(12)};
             if (!include_removed && r.state != "present") continue;
             rows.push_back(std::move(r));
         }
@@ -1017,7 +1171,20 @@ Json Library::collections(const Json& params) {
         j["position"] = opt(r.position);
         j["origin"] = r.origin;
         if (r.state != "present") j["origin_state"] = r.state;
-        j["editable"] = r.origin == "local";
+        // SpektraLab's own albums, groups, projects and smart albums; never
+        // Capture One's, a folder (where files are) or a fixed row.
+        j["editable"] = r.origin == "local" &&
+                        (r.kind == "album" || r.kind == "group" || r.kind == "project" || r.kind == "smart_album");
+        j["created_at"] = iso(r.created_at, true);
+        // What to call it: its name, or a folder's own name where Capture One
+        // stores none (its folders are named by their path).
+        std::string title = r.name;
+        if (title.empty() && r.kind == "folder" && r.folder) {
+            std::string dir = resolve_location(*r.folder);
+            title = fs::path(dir).filename().string();
+            if (title.empty()) title = dir;
+        }
+        j["title"] = title;
         Json count_j = nullptr;
         if (r.kind == "album" || r.kind == "variant_album") {
             count_j = count(visible + " AND i.id IN (SELECT image_id FROM collection_image WHERE collection_id = ?)", {Val(r.id)});
@@ -1065,9 +1232,8 @@ Json Library::collections(const Json& params) {
     return {{"collections", out}};
 }
 
-Json Library::images(const Json& params) {
+void Library::scope(const Json& params, Where& w) {
     const Json p = params.is_object() ? params : Json::object();
-    Where w;
     bool include_removed = p.value("include_removed", false);
     bool include_trashed = p.value("include_trashed", false);
     if (!include_removed) w.add("i.origin_state = 'present'");
@@ -1119,6 +1285,13 @@ Json Library::images(const Json& params) {
     if (trashed_view) w.add(std::string(kTrashed) + " = 1");
     else if (!include_trashed) w.add(std::string(kTrashed) + " = 0");
     if (p.contains("filter")) apply_filter(w, p["filter"]);
+}
+
+Json Library::images(const Json& params) {
+    const Json p = params.is_object() ? params : Json::object();
+    Where w;
+    scope(p, w);
+    bool include_removed = p.value("include_removed", false);
 
     std::string sort = p.value("sort", std::string("captured"));
     std::string order = sort == "captured" ? "i.captured_local IS NULL, i.captured_local, i.file_name"
@@ -1151,7 +1324,7 @@ Json Library::images(const Json& params) {
         "SELECT i.id, i.uuid, i.location_id, i.file_name, i.display_name, i.kind, i.inside_library, i.width, i.height,"
         " i.file_size, i.captured_local, i.imported_at, i.camera_make, i.camera_model, i.lens, i.iso, i.aperture,"
         " i.shutter, i.focal_length, i.exposure_comp, ") + kTrashed + ", i.origin, i.origin_state, " + kRating + ", " +
-        kColor + ", i.gps_lat, i.gps_lon, i.gps_alt FROM image i " + kPrimary + " WHERE " + w.sql + " ORDER BY " + order +
+        kColor + ", i.gps_lat, i.gps_lon, i.gps_alt, i.described_at, i.added_at FROM image i " + kPrimary + " WHERE " + w.sql + " ORDER BY " + order +
         " LIMIT ? OFFSET ?";
     auto s = db_.prepare(sql);
     size_t k = 0;
@@ -1186,6 +1359,8 @@ Json Library::images(const Json& params) {
             j["exposure"] = {{"iso", opt(s.opt_i64(15))}, {"aperture", opt(s.opt_f64(16))}, {"shutter", opt(s.opt_f64(17))},
                              {"focal_length", opt(s.opt_f64(18))}, {"compensation", opt(s.opt_text(19))}};
             j["gps"] = {{"lat", opt(s.opt_text(25))}, {"lon", opt(s.opt_text(26))}, {"alt", opt(s.opt_text(27))}};
+            j["described"] = !s.is_null(28);
+            j["added_at"] = iso(s.f64(29), true);
         }
         j["origin"] = s.text(21);
         if (s.text(22) != "present") j["origin_state"] = s.text(22);
@@ -1531,6 +1706,8 @@ Json Library::add_images(const Json& params) {
     std::string dest_rel = params.value("destination", std::string(kind_ == "session" ? "Capture" : ""));
     Json results = Json::array();
     int64_t added = 0;
+    std::vector<int64_t> added_ids;
+    {
     Transaction t(db_);
     const double now = now_unix();
     for (auto& item : params["items"]) {
@@ -1584,7 +1761,7 @@ Json Library::add_images(const Json& params) {
         auto ins = db_.prepare(
             "INSERT INTO image(uuid, location_id, file_name, display_name, kind, inside_library, width, height, file_size,"
             " captured_local, imported_at, camera_make, camera_model, lens, iso, aperture, shutter, focal_length,"
-            " exposure_comp, added_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            " exposure_comp, added_at, described_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
         auto s_or_null = [&](const char* k) -> std::optional<std::string> {
             return meta_in.contains(k) && meta_in[k].is_string() ? std::optional(meta_in[k].get<std::string>()) : std::nullopt;
         };
@@ -1603,9 +1780,11 @@ Json Library::add_images(const Json& params) {
             .bind(9, int64_t(fs::file_size(target, ec))).bind(10, captured).bind(11, now)
             .bind(12, s_or_null("camera_make")).bind(13, s_or_null("camera_model")).bind(14, s_or_null("lens"))
             .bind(15, i_or_null("iso")).bind(16, f_or_null("aperture")).bind(17, f_or_null("shutter"))
-            .bind(18, f_or_null("focal_length")).bind(19, s_or_null("exposure_comp")).bind(20, now);
+            .bind(18, f_or_null("focal_length")).bind(19, s_or_null("exposure_comp")).bind(20, now)
+            .bind(21, meta_in.empty() ? std::optional<double>() : std::optional<double>(now));
         ins.run();
         int64_t iid = db_.last_insert_id();
+        added_ids.push_back(iid);
         auto vi = db_.prepare("INSERT INTO variant(uuid, image_id, position, created_at) VALUES (?, ?, 1, ?)");
         vi.bind(1, vuuid).bind(2, iid).bind(3, now);
         vi.run();
@@ -1623,7 +1802,18 @@ Json Library::add_images(const Json& params) {
         results.push_back(r);
     }
     t.commit();
-    return {{"added", added}, {"results", results}};
+    }
+    Json out{{"added", added}, {"results", results}};
+    // Each import is a Recent Imports album, as in Capture One. A session's
+    // scan and a folder's later syncs are not imports.
+    if (added > 0 && params.value("recent_import", true)) {
+        if (auto album = new_recent_import(added_ids)) {
+            auto s = db_.prepare("SELECT uuid FROM collection WHERE id = ?");
+            s.bind(1, *album);
+            if (s.step()) out["recent_import"] = s.text(0);
+        }
+    }
+    return out;
 }
 
 Json Library::collection_create(const Json& params) {
@@ -1900,7 +2090,7 @@ Json Library::session_scan(const Json& params) {
     std::sort(found.begin(), found.end());
     Json items = Json::array();
     for (auto& f : found) items.push_back(f);
-    Json added = add_images({{"items", items}, {"mode", "reference"}});
+    Json added = add_images({{"items", items}, {"mode", "reference"}, {"recent_import", false}});
     int64_t missing = 0;
     {
         if (!locations_) build_location_cache();
@@ -2053,6 +2243,489 @@ Json Library::session_trash_commit(const Json& params) {
     }
     t.commit();
     return {{"dropped", dropped}, {"refused", refused}};
+}
+
+// --- facets -------------------------------------------------------------------------------------
+
+Json Library::facets(const Json& params) {
+    const Json p = params.is_object() ? params : Json::object();
+    const Json filter = p.contains("filter") && p["filter"].is_object() ? p["filter"] : Json::object();
+    // A facet's counts ignore the facet's own filter keys: ticking 3 stars
+    // still shows how many 4 and 5 there are.
+    auto run = [&](const std::vector<const char*>& own, const std::string& select, const std::string& join,
+                   const std::string& group) {
+        Json q = p;
+        Json f = filter;
+        for (auto k : own) f.erase(k);
+        q["filter"] = f;
+        Where w;
+        scope(q, w);
+        auto s = db_.prepare("SELECT " + select + " FROM image i " + kPrimary + " " + join + " WHERE " + w.sql +
+                             (group.empty() ? std::string() : " GROUP BY " + group));
+        for (size_t k = 0; k < w.binds.size(); ++k) bind_val(s, int(k) + 1, w.binds[k]);
+        return s;
+    };
+    Json out;
+    {
+        auto s = run({}, "count(*)", "", "");
+        s.step();
+        out["total"] = s.i64(0);
+    }
+    {
+        Json a = Json::array();
+        auto s = run({"min_rating", "max_rating", "ratings"}, std::string(kRating) + ", count(*)", "", "1 ORDER BY 1 DESC");
+        while (s.step()) a.push_back({{"value", s.i64(0)}, {"count", s.i64(1)}});
+        out["rating"] = a;
+    }
+    {
+        Json a = Json::array();
+        auto s = run({"color_tags"}, std::string("COALESCE(") + kColor + ", 0), count(*)", "", "1 ORDER BY 1");
+        while (s.step()) a.push_back({{"value", s.i64(0)}, {"count", s.i64(1)}});
+        out["color_tag"] = a;
+    }
+    {
+        Json a = Json::array();
+        auto s = run({"kinds"}, "i.kind, count(*)", "", "1 ORDER BY 2 DESC");
+        while (s.step()) a.push_back({{"value", s.text(0)}, {"count", s.i64(1)}});
+        out["kind"] = a;
+    }
+    {
+        // The camera's wall clock, as stored: strftime reads it as UTC, which
+        // is exactly the floating time it is.
+        Json years = Json::array(), months = Json::array(), days = Json::array();
+        int64_t undated = 0;
+        auto s = run({"captured_from", "captured_to"},
+                     "strftime('%Y-%m-%d', i.captured_local, 'unixepoch'), count(*)", "", "1 ORDER BY 1");
+        std::map<std::string, int64_t> y, m;
+        while (s.step()) {
+            if (s.is_null(0)) { undated += s.i64(1); continue; }
+            std::string d = s.text(0);
+            days.push_back({{"value", d}, {"count", s.i64(1)}});
+            y[d.substr(0, 4)] += s.i64(1);
+            m[d.substr(0, 7)] += s.i64(1);
+        }
+        for (auto& [k, n] : y) years.push_back({{"value", k}, {"count", n}});
+        for (auto& [k, n] : m) months.push_back({{"value", k}, {"count", n}});
+        out["captured"] = {{"years", years}, {"months", months}, {"days", days}, {"undated", undated}};
+    }
+    {
+        Json a = Json::array();
+        auto s = run({"camera_model", "camera_models"}, "i.camera_model, MAX(i.camera_make), count(*)", "", "1 ORDER BY 3 DESC, 1");
+        while (s.step()) a.push_back({{"value", opt(s.opt_text(0))}, {"make", opt(s.opt_text(1))}, {"count", s.i64(2)}});
+        out["camera"] = a;
+    }
+    {
+        Json a = Json::array();
+        auto s = run({"lenses"}, "i.lens, count(*)", "", "1 ORDER BY 2 DESC, 1");
+        while (s.step()) a.push_back({{"value", opt(s.opt_text(0))}, {"count", s.i64(1)}});
+        out["lens"] = a;
+    }
+    {
+        Json a = Json::array();
+        auto s = run({"keywords"}, "vk.keyword, count(DISTINCT i.id)", "JOIN variant_keyword vk ON vk.variant_id = pv.id",
+                     "1 ORDER BY 2 DESC, 1");
+        while (s.step()) a.push_back({{"value", s.text(0)}, {"count", s.i64(1)}});
+        out["keyword"] = a;
+    }
+    {
+        auto s = run({"has_edit"},
+                     "EXISTS (SELECT 1 FROM edit e JOIN variant ev ON ev.id = e.variant_id WHERE ev.image_id = i.id), count(*)",
+                     "", "1");
+        int64_t yes = 0, no = 0;
+        while (s.step()) (s.i64(0) ? yes : no) += s.i64(1);
+        out["edited"] = {{"yes", yes}, {"no", no}};
+    }
+    {
+        auto s = run({"described"}, "i.described_at IS NULL, count(*)", "", "1");
+        int64_t pending = 0;
+        while (s.step()) if (s.i64(0)) pending += s.i64(1);
+        out["undescribed"] = pending;
+    }
+    return out;
+}
+
+// --- what the app read of a file ------------------------------------------------------------------
+
+Json Library::describe(const Json& params) {
+    if (!params.contains("items") || !params["items"].is_array()) throw ApiError("invalid_params", "'items' must be an array");
+    Json results = Json::array();
+    int64_t updated = 0;
+    Transaction t(db_);
+    auto up = db_.prepare(
+        "UPDATE image SET captured_local = COALESCE(?1, captured_local), width = COALESCE(?2, width),"
+        " height = COALESCE(?3, height), camera_make = COALESCE(?4, camera_make), camera_model = COALESCE(?5, camera_model),"
+        " lens = COALESCE(?6, lens), iso = COALESCE(?7, iso), aperture = COALESCE(?8, aperture),"
+        " shutter = COALESCE(?9, shutter), focal_length = COALESCE(?10, focal_length),"
+        " exposure_comp = COALESCE(?11, exposure_comp), described_at = ?12 WHERE id = ?13");
+    const double now = now_unix();
+    for (auto& item : params["items"]) {
+        std::string uuid = item.is_object() ? item.value("image", std::string()) : std::string();
+        Json r{{"image", uuid}};
+        auto s = db_.prepare("SELECT id, origin FROM image WHERE uuid = ?");
+        s.bind(1, uuid);
+        if (uuid.empty() || !s.step()) { r["error"] = {{"code", "not_found"}, {"message", "no image " + uuid}}; results.push_back(r); continue; }
+        if (s.text(1) != "local") {
+            r["error"] = {{"code", "read_only"}, {"message", "Capture One's image; its metadata is Capture One's"}};
+            results.push_back(r);
+            continue;
+        }
+        const Json m = item.contains("metadata") && item["metadata"].is_object() ? item["metadata"] : Json::object();
+        auto str = [&](const char* k) { return m.contains(k) && m[k].is_string() ? std::optional(m[k].get<std::string>()) : std::nullopt; };
+        auto num = [&](const char* k) { return m.contains(k) && m[k].is_number() ? std::optional(m[k].get<double>()) : std::nullopt; };
+        auto in = [&](const char* k) { return m.contains(k) && m[k].is_number() ? std::optional(m[k].get<int64_t>()) : std::nullopt; };
+        std::optional<double> captured;
+        if (auto c = str("captured_local")) captured = parse_local(*c);
+        up.bind(1, captured).bind(2, in("width")).bind(3, in("height")).bind(4, str("camera_make"))
+            .bind(5, str("camera_model")).bind(6, str("lens")).bind(7, in("iso")).bind(8, num("aperture"))
+            .bind(9, num("shutter")).bind(10, num("focal_length")).bind(11, str("exposure_comp")).bind(12, now)
+            .bind(13, s.i64(0));
+        up.run();
+        ++updated;
+        results.push_back(r);
+    }
+    t.commit();
+    return {{"updated", updated}, {"results", results}};
+}
+
+// --- Recent Imports -----------------------------------------------------------------------------
+
+std::optional<int64_t> Library::new_recent_import(const std::vector<int64_t>& images) {
+    if (images.empty() || meta("origin_kind", "none") != "none") return std::nullopt;
+    auto r = db_.prepare("SELECT id FROM collection WHERE kind = 'recent_imports' AND origin = 'local' LIMIT 1");
+    if (!r.step()) return std::nullopt;
+    const int64_t parent = r.i64(0);
+    const double now = now_unix();
+    // Named in this Mac's local time, as Capture One names them; the app can
+    // spell `created_at` (UTC) in its own language instead.
+    time_t secs = time_t(now);
+    std::tm tm{};
+    localtime_r(&secs, &tm);
+    char name[32];
+    std::strftime(name, sizeof name, "%Y-%m-%d %H:%M", &tm);
+    Transaction t(db_);
+    auto ins = db_.prepare("INSERT INTO collection(uuid, parent_id, kind, name, position, created_at) VALUES"
+                           " (?, ?, 'album', ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM collection WHERE parent_id = ?), ?)");
+    ins.bind(1, new_uuid()).bind(2, parent).bind(3, name).bind(4, parent).bind(5, now);
+    ins.run();
+    const int64_t album = db_.last_insert_id();
+    auto add = db_.prepare("INSERT OR IGNORE INTO collection_image(collection_id, image_id, position) VALUES (?, ?, ?)");
+    int64_t n = 0;
+    for (int64_t id : images) { add.bind(1, album).bind(2, id).bind(3, ++n); add.run(); }
+    // The 20 newest are kept, as Capture One keeps a handful; an album that
+    // goes takes no image with it.
+    auto old = db_.prepare("SELECT id FROM collection WHERE parent_id = ? ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET 20");
+    old.bind(1, parent);
+    std::vector<int64_t> drop;
+    while (old.step()) drop.push_back(old.i64(0));
+    for (int64_t id : drop) {
+        auto d = db_.prepare("DELETE FROM collection_image WHERE collection_id = ?");
+        d.bind(1, id);
+        d.run();
+        auto dc = db_.prepare("DELETE FROM collection WHERE id = ?");
+        dc.bind(1, id);
+        dc.run();
+    }
+    t.commit();
+    return album;
+}
+
+// --- referenced folders kept in step --------------------------------------------------------------
+
+std::vector<int64_t> Library::locations_under(const std::string& root, bool recursive) {
+    if (!locations_) build_location_cache();
+    std::vector<int64_t> out;
+    for (auto& [id, dir] : locations_->dir)
+        if (nfc(dir) == nfc(root) || (recursive && is_prefix_dir(nfc(root), nfc(dir)))) out.push_back(id);
+    return out;
+}
+
+Json Library::sync_tree(const std::string& root, bool recursive, const std::set<std::string>& skip, bool recent_import) {
+    auto t0 = std::chrono::steady_clock::now();
+    std::error_code ec;
+    Json report{{"path", root}};
+    // A folder that is not there is a disk that is away, never a deletion:
+    // nothing is marked.
+    if (!fs::is_directory(root, ec)) {
+        report["offline"] = true;
+        return report;
+    }
+    report["offline"] = false;
+
+    // 1. The pictures in the folder now. Hidden files, other libraries'
+    //    packages and the names in `skip` (a Capture One session's
+    //    `CaptureOne` caches) are not walked.
+    std::vector<std::string> files;
+    auto take = [&](const fs::directory_entry& e, bool& descend) {
+        descend = false;
+        std::string name = e.path().filename().string();
+        if (name.empty() || name[0] == '.') return;
+        std::error_code ec2;
+        if (e.is_directory(ec2)) {
+            descend = !skip.count(name) && !is_library_package(e.path());
+            return;
+        }
+        if (!e.is_regular_file(ec2) || name.find(".spksession") != std::string::npos) return;
+        std::string k = kind_for_extension(name);
+        if (k == "raw" || k == "raster") files.push_back(e.path().string());
+    };
+    if (recursive) {
+        for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+             !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            bool descend = false;
+            take(*it, descend);
+            if (!descend && it->is_directory(ec)) it.disable_recursion_pending();
+            ec.clear();
+        }
+    } else {
+        for (auto& e : fs::directory_iterator(root, fs::directory_options::skip_permission_denied, ec)) {
+            bool descend;
+            take(e, descend);
+        }
+    }
+    std::sort(files.begin(), files.end());
+
+    // 2. What the library has there: SpektraLab's rows, by path.
+    struct Known {
+        int64_t id;
+        std::string state, name;
+        std::optional<int64_t> size;
+        bool seen = false;
+    };
+    std::vector<Known> known;
+    std::unordered_map<std::string, size_t> by_path;
+    {
+        auto locs = locations_under(root, recursive);
+        std::string in;
+        for (auto id : locs) in += (in.empty() ? "" : ",") + std::to_string(id);
+        if (!in.empty()) {
+            auto s = db_.prepare("SELECT id, origin_state, file_size, file_name, location_id FROM image"
+                                 " WHERE origin = 'local' AND location_id IN (" + in + ")");
+            while (s.step()) {
+                by_path[nfc(join_path(resolve_location(s.i64(4)), s.text(3)))] = known.size();
+                known.push_back({s.i64(0), s.text(1), s.text(3), s.opt_i64(2)});
+            }
+        }
+    }
+
+    int64_t unchanged = 0, updated = 0, restored = 0, moved = 0, removed = 0;
+    Json moved_list = Json::array();
+    std::vector<std::string> to_add;
+    {
+        Transaction t(db_);
+        auto restore = db_.prepare("UPDATE image SET origin_state = 'present' WHERE id = ?");
+        auto resize = db_.prepare("UPDATE image SET file_size = ? WHERE id = ?");
+        std::vector<std::string> fresh;
+        for (auto& f : files) {
+            auto it = by_path.find(nfc(f));
+            if (it == by_path.end()) { fresh.push_back(f); continue; }
+            Known& k = known[it->second];
+            k.seen = true;
+            bool touched = false;
+            if (k.state != "present") { restore.bind(1, k.id); restore.run(); ++restored; touched = true; }
+            int64_t size = int64_t(fs::file_size(f, ec));
+            if (!ec && k.size && *k.size != size) { resize.bind(1, size).bind(2, k.id); resize.run(); ++updated; touched = true; }
+            ec.clear();
+            if (!touched) ++unchanged;
+        }
+        // Gone from where the library had them. A file that is still there
+        // but was not walked (a skipped folder) is not gone.
+        std::map<std::pair<std::string, int64_t>, std::vector<size_t>> vanished;
+        for (auto& [path, i] : by_path) {
+            Known& k = known[i];
+            if (k.seen || k.state != "present") continue;
+            struct stat st {};
+            if (::stat(path.c_str(), &st) == 0) continue;
+            vanished[{nfc(k.name), k.size.value_or(-1)}].push_back(i);
+        }
+        // Moved: a new file whose name and size are those of exactly one
+        // file that went. The row follows it, so its variants, rating,
+        // albums and edit stay with the photograph.
+        auto mv = db_.prepare("UPDATE image SET previous_location_id = location_id, location_id = ?, file_name = ?,"
+                              " origin_state = 'present' WHERE id = ?");
+        for (auto& f : fresh) {
+            fs::path fp(f);
+            int64_t size = int64_t(fs::file_size(fp, ec));
+            if (ec) { ec.clear(); to_add.push_back(f); continue; }
+            auto v = vanished.find({nfc(fp.filename().string()), size});
+            if (v == vanished.end() || v->second.size() != 1) { to_add.push_back(f); continue; }
+            Known& k = known[v->second[0]];
+            int64_t loc = ensure_location(fp.parent_path().string());
+            ensure_folder(loc);
+            mv.bind(1, loc).bind(2, fp.filename().string()).bind(3, k.id);
+            mv.run();
+            auto u = db_.prepare("SELECT uuid FROM image WHERE id = ?");
+            u.bind(1, k.id);
+            u.step();
+            if (moved_list.size() < 50) moved_list.push_back({{"image", u.text(0)}, {"to", f}});
+            vanished.erase(v);
+            ++moved;
+        }
+        auto rm = db_.prepare("UPDATE image SET origin_state = 'removed' WHERE id = ?");
+        for (auto& [key, ids] : vanished)
+            for (size_t i : ids) { rm.bind(1, known[i].id); rm.run(); ++removed; }
+        t.commit();
+    }
+
+    // 3. The rest is new, added where it is.
+    int64_t added = 0;
+    if (!to_add.empty()) {
+        Json items = Json::array();
+        for (auto& f : to_add) items.push_back(f);
+        Json a = add_images({{"items", items}, {"mode", "reference"}, {"recent_import", recent_import}});
+        added = a["added"].get<int64_t>();
+        if (a.contains("recent_import")) report["recent_import"] = a["recent_import"];
+    }
+    report["seen"] = files.size();
+    report["added"] = added;
+    report["moved"] = moved;
+    report["moved_files"] = moved_list;
+    report["removed"] = removed;
+    report["restored"] = restored;
+    report["updated"] = updated;
+    report["unchanged"] = unchanged;
+    report["ms"] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return report;
+}
+
+Json Library::sync_watched(int64_t watched_id, bool first) {
+    auto s = db_.prepare("SELECT uuid, location_id, recursive, skip FROM watched_folder WHERE id = ?");
+    s.bind(1, watched_id);
+    if (!s.step()) throw ApiError("not_found", "no watched folder");
+    std::string uuid = s.text(0);
+    std::string root = resolve_location(s.i64(1));
+    bool recursive = s.i64(2) != 0;
+    std::set<std::string> skip;
+    if (!s.is_null(3)) for (auto& k : Json::parse(s.text(3))) skip.insert(k.get<std::string>());
+    Json report = sync_tree(root, recursive, skip, first);
+    report["folder"] = uuid;
+    if (!report.value("offline", false)) {
+        auto u = db_.prepare("UPDATE watched_folder SET synced_at = ?, last_report = ? WHERE id = ?");
+        u.bind(1, now_unix()).bind(2, report.dump()).bind(3, watched_id);
+        u.run();
+    }
+    return report;
+}
+
+Json Library::folders_add(const Json& params) {
+    require_own_library();
+    std::string path = fs::path(need_string(params, "path")).lexically_normal().string();
+    while (path.size() > 1 && path.back() == '/') path.pop_back();
+    std::error_code ec;
+    if (!fs::is_directory(path, ec)) throw ApiError("not_found", "no folder at " + path);
+    // A Capture One catalog is linked (capture_one.link), never walked as a
+    // folder: its Originals are Capture One's.
+    for (fs::path a(path); ; a = a.parent_path()) {
+        if (is_library_package(a)) throw ApiError("invalid_params", "the folder is inside another library: " + a.string());
+        if (!a.has_parent_path() || a.parent_path() == a) break;
+    }
+    if (path == path_ || is_prefix_dir(path_, path))
+        throw ApiError("invalid_params", "the folder is inside this library; it is already its own");
+    bool recursive = params.value("recursive", true);
+    auto skip = string_list(params, "skip");
+    int64_t loc = ensure_location(path);
+    int64_t id;
+    bool first = true;
+    {
+        auto s = db_.prepare("SELECT id FROM watched_folder WHERE location_id = ?");
+        s.bind(1, loc);
+        if (s.step()) {
+            id = s.i64(0);
+            first = false;
+        } else {
+            Json sk = Json::array();
+            for (auto& k : skip) sk.push_back(k);
+            auto ins = db_.prepare("INSERT INTO watched_folder(uuid, location_id, recursive, skip, added_at) VALUES (?, ?, ?, ?, ?)");
+            ins.bind(1, new_uuid()).bind(2, loc).bind(3, int64_t(recursive)).bind(4, sk.dump()).bind(5, now_unix());
+            ins.run();
+            id = db_.last_insert_id();
+        }
+    }
+    int64_t col = ensure_folder(loc);
+    Json report = sync_watched(id, first);
+    auto c = db_.prepare("SELECT uuid FROM collection WHERE id = ?");
+    c.bind(1, col);
+    c.step();
+    return {{"folder", report["folder"]}, {"collection", c.text(0)}, {"path", path}, {"sync", report}};
+}
+
+Json Library::folders_list(const Json&) {
+    if (!locations_) build_location_cache();
+    Json out = Json::array();
+    auto s = db_.prepare("SELECT w.uuid, w.location_id, w.recursive, w.skip, w.added_at, w.synced_at, w.last_report,"
+                         " (SELECT uuid FROM collection WHERE kind = 'folder' AND origin = 'local' AND folder_location_id = w.location_id)"
+                         " FROM watched_folder w ORDER BY w.id");
+    while (s.step()) {
+        std::string dir = resolve_location(s.i64(1));
+        bool recursive = s.i64(2) != 0;
+        std::string in;
+        for (auto id : locations_under(dir, recursive)) in += (in.empty() ? "" : ",") + std::to_string(id);
+        int64_t n = 0;
+        if (!in.empty()) {
+            auto c = db_.prepare("SELECT count(*) FROM image WHERE origin_state = 'present' AND location_id IN (" + in + ")");
+            c.step();
+            n = c.i64(0);
+        }
+        std::error_code ec;
+        Json j{{"folder", s.text(0)}, {"path", dir}, {"recursive", recursive},
+               {"skip", s.is_null(3) ? Json::array() : Json::parse(s.text(3))}, {"collection", opt(s.opt_text(7))},
+               {"online", fs::is_directory(dir, ec)}, {"image_count", n}, {"added_at", iso(s.f64(4), true)},
+               {"synced_at", s.is_null(5) ? Json(nullptr) : Json(iso(s.f64(5), true))},
+               {"last_sync", s.is_null(6) ? Json(nullptr) : Json::parse(s.text(6))}};
+        if (j["last_sync"].is_object()) j["last_sync"].erase("moved_files");
+        out.push_back(std::move(j));
+    }
+    return {{"folders", out}};
+}
+
+Json Library::folders_sync(const Json& params) {
+    require_own_library();
+    std::vector<int64_t> ids;
+    if (params.contains("folder") && params["folder"].is_string()) {
+        auto s = db_.prepare("SELECT id FROM watched_folder WHERE uuid = ?");
+        s.bind(1, params["folder"].get<std::string>());
+        if (!s.step()) throw ApiError("not_found", "no watched folder " + params["folder"].get<std::string>());
+        ids.push_back(s.i64(0));
+    } else {
+        auto s = db_.prepare("SELECT id FROM watched_folder ORDER BY id");
+        while (s.step()) ids.push_back(s.i64(0));
+    }
+    Json out;
+    Json folders = Json::array();
+    int64_t added = 0, moved = 0, removed = 0, restored = 0;
+    auto sum = [&](const Json& r) {
+        added += r.value("added", int64_t{0});
+        moved += r.value("moved", int64_t{0});
+        removed += r.value("removed", int64_t{0});
+        restored += r.value("restored", int64_t{0});
+    };
+    for (int64_t id : ids) {
+        Json r = sync_watched(id, false);
+        sum(r);
+        folders.push_back(std::move(r));
+    }
+    out["folders"] = folders;
+    // A session is a folder kept in step too: its own tree, whatever
+    // Finder, a card copy or a tethered camera put there.
+    if (kind_ == "session" && !(params.contains("folder") && params["folder"].is_string())) {
+        Json r = sync_tree(path_, true, {}, false);
+        sum(r);
+        out["session"] = r;
+    }
+    out["added"] = added;
+    out["moved"] = moved;
+    out["removed"] = removed;
+    out["restored"] = restored;
+    return out;
+}
+
+Json Library::folders_remove(const Json& params) {
+    std::string uuid = need_string(params, "folder");
+    auto s = db_.prepare("DELETE FROM watched_folder WHERE uuid = ?");
+    s.bind(1, uuid);
+    s.run();
+    if (db_.changes() == 0) throw ApiError("not_found", "no watched folder " + uuid);
+    // Its images stay, as referenced images no sync looks after any more.
+    return {{"removed", true}, {"images_removed", 0}};
 }
 
 }  // namespace spklib
