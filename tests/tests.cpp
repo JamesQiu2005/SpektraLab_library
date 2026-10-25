@@ -224,6 +224,452 @@ static Json find_by(const Json& arr, const std::string& key, const std::string& 
     return nullptr;
 }
 
+// --- copies of a Capture One catalog -------------------------------------------------------------
+
+static Json children_of(const Json& cols, const std::string& parent) {
+    Json out = Json::array();
+    for (auto& c : cols) if (c["parent"].is_string() && c["parent"] == parent) out.push_back(c);
+    return out;
+}
+
+static std::string uuid_of_kind(const Json& cols, const std::string& kind) {
+    Json c = find_by(cols, "kind", kind);
+    return c.is_null() ? std::string() : c["uuid"].get<std::string>();
+}
+
+static void copies() {
+    run("copy: every image, variant, folder, album and membership, with Capture One's values", [] {
+        fs::path root = tmpdir("copy");
+        FakeCatalog fc(root);
+        auto before = census(fc.package);
+        Ctx c;
+        Json r = c("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}});
+        std::string L = r["library"];
+        CHECK(fs::exists(root / "Copy.spkcatalog/Library.spkdb"));
+        Json rep = r["report"];
+        CHECK_EQ(rep["images"].get<int>(), 5);
+        CHECK_EQ(rep["variants"].get<int>(), 6);
+        CHECK_EQ(rep["collections"].get<int>(), 9);  // root, All Images, Recent Imports/Captures, Trash, Catalog, 3 albums
+        CHECK_EQ(rep["folders"].get<int>(), 3);
+        CHECK_EQ(rep["keywords"].get<int>(), 0);
+        CHECK_EQ(rep["album_members"].get<int>(), 5);
+        CHECK_EQ(rep["mapped_to_fixed_rows"].get<int>(), 5);
+        CHECK_EQ(rep["parents_repaired"].get<int>(), 1);
+
+        Json info = r["info"];
+        CHECK_EQ(info["origin"]["kind"].get<std::string>(), std::string("none"));
+        CHECK_EQ(info["name"].get<std::string>(), std::string("Fake"));
+        CHECK_EQ(info["copied_from"]["kind"].get<std::string>(), std::string("capture_one.catalog"));
+        CHECK_EQ(info["copied_from"]["document_uuid"].get<std::string>(), fc.uuid);
+        CHECK_EQ(info["copied_from"]["path"].get<std::string>(), fc.package.string());
+        CHECK_EQ(info["copied_from"]["format"].get<std::string>(), std::string("16.8.6.25 Pro Mac"));
+        CHECK(info["copied_from"]["fingerprint"].is_object());
+        CHECK(info["copied_from"]["copied_at"].is_string());
+        CHECK(info["copied_from"]["updated_at"].is_null());
+
+        Json all = c("images.list", {{"library", L}, {"check_files", true}, {"full", true}})["images"];
+        CHECK_EQ(all.size(), size_t(4));  // C is trashed, as in Capture One
+        for (auto& im : all) { CHECK(im["exists"].get<bool>()); CHECK_EQ(im["origin"].get<std::string>(), std::string("local")); }
+        Json a = find_by(all, "uuid", "IMG-A");
+        CHECK_EQ(a["path"].get<std::string>(), (fc.photos / "A.NEF").string());
+        CHECK_EQ(a["captured_local"].get<std::string>(), std::string("2024-01-08T23:39:04"));
+        CHECK_EQ(a["camera"]["model"].get<std::string>(), std::string("NIKON Z6_3"));
+        CHECK_EQ(a["width"].get<int>(), 6048);
+        CHECK_EQ(a["exposure"]["iso"].get<int>(), 250);
+        CHECK_EQ(a["variants"].size(), size_t(2));
+        CHECK_EQ(a["variants"][1]["rating"].get<int>(), 4);
+        CHECK_EQ(find_by(all, "uuid", "IMG-B")["rating"].get<int>(), 3);
+        CHECK_EQ(find_by(all, "uuid", "IMG-B")["color_tag"].get<int>(), 2);
+        CHECK_EQ(find_by(all, "uuid", "IMG-E")["path"].get<std::string>(), (fc.package / "Originals/2026/01/02/1/E.tif").string());
+        Json cimg = c("image.get", {{"library", L}, {"image", "IMG-C"}});
+        CHECK(cimg["trashed"].get<bool>());
+        CHECK_EQ(cimg["rating"].get<int>(), 5);
+        // What Capture One said, beside SpektraLab's own value.
+        Json ag = c("image.get", {{"library", L}, {"image", "IMG-A"}});
+        CHECK_EQ(ag["variants"][1]["capture_one"]["rating"].get<int>(), 4);
+        CHECK_EQ(ag["variants"][1]["capture_one"]["metadata"]["creator"].get<std::string>(), std::string("A Photographer"));
+
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        int roots = 0;
+        for (auto& col : cols) { roots += col["kind"] == "root"; CHECK_EQ(col["origin"].get<std::string>(), std::string("local")); }
+        CHECK_EQ(roots, 1);
+        CHECK(find_by(cols, "uuid", "COL-ROOT").is_null());  // Capture One's fixed rows are the copy's own
+        CHECK(find_by(cols, "uuid", "COL-ALL").is_null());
+        std::string ri = uuid_of_kind(cols, "recent_imports"), rootu = uuid_of_kind(cols, "root");
+        Json imp = find_by(cols, "uuid", "COL-IMPORT");
+        CHECK_EQ(imp["kind"].get<std::string>(), std::string("album"));
+        CHECK_EQ(imp["parent"].get<std::string>(), ri);
+        CHECK_EQ(imp["created_at"].get<std::string>(), std::string("2026-10-04T13:31:37Z"));
+        CHECK_EQ(imp["title"].get<std::string>(), std::string("2026年10月4日 21:31"));
+        CHECK_EQ(imp["image_count"].get<int>(), 2);
+        CHECK(imp["editable"].get<bool>());
+        CHECK_EQ(find_by(cols, "kind", "recent_imports")["image_count"].get<int>(), 2);
+        CHECK_EQ(find_by(cols, "uuid", "COL-RC")["kind"].get<std::string>(), std::string("recent_captures"));
+        CHECK_EQ(find_by(cols, "uuid", "COL-RC")["parent"].get<std::string>(), rootu);
+        Json picks = find_by(cols, "uuid", "COL-PICKS");
+        CHECK(picks["parent"].is_null());  // top level, as SpektraLab's own albums are
+        CHECK_EQ(picks["image_count"].get<int>(), 2);
+        CHECK(picks["editable"].get<bool>());
+        CHECK_EQ(find_by(cols, "uuid", "COL-SMART")["supported"].get<bool>(), false);
+        CHECK_EQ(find_by(cols, "kind", "all_images")["image_count"].get<int>(), 4);
+        CHECK_EQ(find_by(cols, "kind", "trash")["image_count"].get<int>(), 1);
+        CHECK_EQ(find_by(cols, "kind", "in_library")["image_count"].get<int>(), 1);
+        CHECK_EQ(find_by(cols, "uuid", "COL-F-PHOTOS")["image_count"].get<int>(), 2);
+        CHECK_EQ(find_by(cols, "uuid", "COL-F-SUB")["parent"].get<std::string>(), std::string("COL-F-PHOTOS"));
+        CHECK_EQ(find_by(cols, "uuid", "COL-F-SUB")["title"].get<std::string>(), std::string("Sub"));
+        CHECK_EQ(c("images.list", {{"library", L}, {"collection", "COL-F-PHOTOS"}, {"recursive", true}})["total"].get<int>(), 3);
+        CHECK_EQ(c("images.list", {{"library", L}, {"collection", "COL-PICKS"}})["total"].get<int>(), 2);
+        Json f = c("images.facets", {{"library", L}});
+        CHECK_EQ(find_by(f["keyword"], "value", "night")["count"].get<int>(), 2);
+
+        CHECK(before == census(fc.package));
+        CHECK(!fs::exists(fc.db.string() + "-journal"));
+        // Something already there is never overwritten.
+        CHECK_EQ(c.err("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}}), std::string("exists"));
+        touch(root / "AFile.spkcatalog", "x");
+        CHECK_EQ(c.err("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "AFile.spkcatalog").string()}}), std::string("exists"));
+        CHECK_EQ(read_file(root / "AFile.spkcatalog"), std::string("x"));
+    });
+
+    run("copy: a mirror's ratings, tags, trash flags and edits carry over", [] {
+        fs::path root = tmpdir("copy-mirror");
+        FakeCatalog fc(root);
+        Ctx c;
+        std::string M = c("capture_one.link", {{"source", fc.package.string()}, {"path", (root / "Mirror").string()}})["library"];
+        c("meta.set", {{"library", M}, {"variants", {"VAR-A1"}}, {"rating", 2}});
+        c("meta.set", {{"library", M}, {"variants", {"VAR-D1"}}, {"color_tag", 5}});
+        c("images.trash", {{"library", M}, {"images", {"IMG-C"}}, {"trashed", false}});
+        c("edit.put", {{"library", M}, {"variant", "VAR-B1"}, {"base_revision", 0}, {"edit", {{"k", 1}}}});
+        Json r = c("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}, {"mirror", M}});
+        std::string L = r["library"];
+        CHECK(L != M);
+        Json fm = r["report"]["from_mirror"];
+        CHECK_EQ(fm["ratings"].get<int>(), 1);
+        CHECK_EQ(fm["color_tags"].get<int>(), 1);
+        CHECK_EQ(fm["trashed"].get<int>(), 1);
+        CHECK_EQ(fm["edits"].get<int>(), 1);
+        Json a = c("image.get", {{"library", L}, {"image", "IMG-A"}});
+        CHECK_EQ(a["variants"][0]["rating"].get<int>(), 2);
+        CHECK_EQ(a["variants"][0]["capture_one"]["rating"].get<int>(), 0);  // the baseline is Capture One's
+        CHECK_EQ(c("image.get", {{"library", L}, {"image", "IMG-D"}})["color_tag"].get<int>(), 5);
+        CHECK_EQ(c("images.list", {{"library", L}})["total"].get<int>(), 5);  // C is out of the trash
+        Json e = c("edit.get", {{"library", L}, {"variant", "VAR-B1"}});
+        CHECK_EQ(e["revision"].get<int>(), 1);
+        CHECK_EQ(e["edit"]["k"].get<int>(), 1);
+        // SpektraLab's value from the mirror counts as SpektraLab's change: Capture One's later
+        // change to the same rating does not replace it.
+        fc.edit("UPDATE ZVARIANTMETADATA SET ZBASIC_RATING = 3 WHERE ZLAYER = 101");
+        Json u = c("capture_one.update", {{"library", L}});
+        CHECK_EQ(u["conflicts_kept"].get<int>(), 1);
+        CHECK_EQ(c("image.get", {{"library", L}, {"image", "IMG-A"}})["variants"][0]["rating"].get<int>(), 2);
+        // The mirror must be a mirror, of this catalog.
+        fs::path other_root = tmpdir("copy-mirror-other");
+        FakeCatalog other(other_root);
+        other.edit("UPDATE ZDOCUMENTCONTENT SET ZDOCUMENTUUID = 'ANOTHER'");
+        std::string O = c("capture_one.link", {{"source", other.package.string()}, {"path", (other_root / "M").string()}})["library"];
+        CHECK_EQ(c.err("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "C2").string()}, {"mirror", O}}), std::string("conflict"));
+        CHECK_EQ(c.err("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "C3").string()}, {"mirror", L}}), std::string("invalid_params"));
+        CHECK_EQ(c.err("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "C4").string()}, {"mirror", "L999"}}), std::string("not_found"));
+        CHECK(!fs::exists(root / "C2.spkcatalog"));
+        CHECK(!fs::exists(root / "C3.spkcatalog"));
+    });
+
+    run("copy: SpektraLab's own -- albums renamed, images added, ratings set, folders watched", [] {
+        fs::path root = tmpdir("copy-edit");
+        FakeCatalog fc(root);
+        touch(fc.photos / "G.NEF", "nef-g");
+        touch(root / "New/H.NEF", "nef-h");
+        Ctx c;
+        std::string L = c("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}})["library"];
+        CHECK_EQ(c.err("collection.update", {{"library", L}, {"collection", "COL-PICKS"}, {"name", "Keepers"}}), std::string(""));
+        CHECK_EQ(c("collection.add", {{"library", L}, {"collection", "COL-PICKS"}, {"images", {"IMG-E"}}})["added"].get<int>(), 1);
+        CHECK_EQ(c.err("meta.set", {{"library", L}, {"variants", {"VAR-B1"}}, {"rating", 5}}), std::string(""));
+        CHECK_EQ(c.err("collection.update", {{"library", L}, {"collection", "COL-SMART"}, {"criteria", {{"min_rating", 5}}}}), std::string(""));
+        Json add = c("images.add", {{"library", L}, {"collection", "COL-PICKS"}, {"items", {(root / "New/H.NEF").string()}}});
+        CHECK_EQ(add["added"].get<int>(), 1);
+        CHECK(add.contains("recent_import"));
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        CHECK_EQ(find_by(cols, "uuid", "COL-PICKS")["name"].get<std::string>(), std::string("Keepers"));
+        CHECK_EQ(find_by(cols, "uuid", "COL-PICKS")["image_count"].get<int>(), 4);
+        CHECK_EQ(find_by(cols, "uuid", add["recent_import"].get<std::string>())["parent"].get<std::string>(), uuid_of_kind(cols, "recent_imports"));
+        // SpektraLab's criteria now, evaluated: B (5 here); C is 5 but trashed.
+        CHECK_EQ(find_by(cols, "uuid", "COL-SMART")["image_count"].get<int>(), 1);
+        CHECK_EQ(c("image.get", {{"library", L}, {"image", "IMG-B"}})["rating"].get<int>(), 5);
+        // A copied folder is a folder SpektraLab can watch: its copied images are the ones there.
+        Json fa = c("folders.add", {{"library", L}, {"path", fc.photos.string()}});
+        CHECK_EQ(fa["sync"]["unchanged"].get<int>(), 4);  // A, B, C, Sub/D
+        CHECK_EQ(fa["sync"]["added"].get<int>(), 1);      // G
+        CHECK_EQ(c.err("library.sync", {{"library", L}}), std::string("invalid_params"));
+        // Deleted in SpektraLab, it stays deleted, whatever Capture One does to it.
+        c("collection.delete", {{"library", L}, {"collection", "COL-IMPORT"}});
+        fc.edit("UPDATE ZCOLLECTION SET ZNAME = 'Renamed import' WHERE Z_PK = 7");
+        Json u = c("capture_one.update", {{"library", L}});
+        CHECK_EQ(u["collections"]["deleted_in_spektralab"].get<int>(), 1);
+        CHECK_EQ(u["members"]["added"].get<int>(), 0);
+        CHECK(find_by(c("collections.list", {{"library", L}})["collections"], "uuid", "COL-IMPORT").is_null());
+        // A library that is not a copy has nothing to update from.
+        std::string N = c("library.create", {{"path", (root / "Native").string()}})["library"];
+        CHECK_EQ(c.err("capture_one.update", {{"library", N}}), std::string("read_only"));
+        std::string Mi = c("capture_one.link", {{"source", fc.package.string()}, {"path", (root / "Mirror").string()}})["library"];
+        CHECK_EQ(c.err("capture_one.update", {{"library", Mi}}), std::string("read_only"));
+    });
+
+    run("update: both sides changed -- SpektraLab wins, Capture One's other changes come in", [] {
+        fs::path root = tmpdir("copy-update");
+        FakeCatalog fc(root);
+        touch(root / "Mine/G.NEF", "nef-g");
+        Ctx c;
+        Json r = c("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}});
+        std::string L = r["library"];
+        Json fp0 = r["info"]["copied_from"]["fingerprint"];
+
+        // SpektraLab: a rating Capture One will not touch, one it will, an image into an album
+        // Capture One will take one out of, that album renamed; and its own image and album.
+        c("meta.set", {{"library", L}, {"variants", {"VAR-C1"}}, {"rating", 2}});
+        c("meta.set", {{"library", L}, {"variants", {"VAR-A2"}}, {"rating", 5}});
+        c("collection.add", {{"library", L}, {"collection", "COL-PICKS"}, {"images", {"IMG-E"}}});
+        c("collection.update", {{"library", L}, {"collection", "COL-PICKS"}, {"name", "Mine"}});
+        std::string mine = c("collection.create", {{"library", L}, {"kind", "album"}, {"name", "SpektraLab's"}})["collection"];
+        Json g = c("images.add", {{"library", L}, {"collection", mine}, {"items", {(root / "Mine/G.NEF").string()}}});
+        std::string gid = g["results"][0]["image"];
+
+        // Capture One: a new image F in a new album, B and A2 re-rated, D deleted, A out of the
+        // import album, B out of Picks, Picks and the smart album renamed.
+        touch(fc.photos / "F.NEF", "nef-f");
+        fc.edit("INSERT INTO ZIMAGE (Z_ENT, Z_PK, ZIMAGEUUID, ZIMAGEFILENAME, ZIMAGELOCATION, ZIMAGECLASSIFICATION) VALUES (12, 6, 'IMG-F', 'F.NEF', 3, 17);"
+                "INSERT INTO ZVARIANT (Z_ENT, Z_PK, ZINDEX, ZVARIANTUUID, ZIMAGE, ZCOMBINEDSETTINGS) VALUES (15, 7, 127, 'VAR-F1', 6, 107);"
+                "INSERT INTO ZVARIANTLAYER (Z_ENT, Z_PK, ZVARIANT) VALUES (20, 107, 7);"
+                "INSERT INTO ZVARIANTMETADATA (Z_ENT, Z_PK, ZLAYER, ZBASIC_RATING) VALUES (13, 107, 107, 4);"
+                "INSERT INTO ZCOLLECTION (Z_ENT, Z_PK, ZUUID, ZNAME, ZPARENT, ZCOLLECTIONINDEX) VALUES (2, 10, 'COL-NEW', 'New album', 1, 8);"
+                "INSERT INTO ZIMAGEINCOLLECTION (Z_ENT, Z_PK, ZCOLLECTION, ZIMAGE) VALUES (47, 10, 10, 6);"
+                "UPDATE ZVARIANTMETADATA SET ZBASIC_RATING = 1 WHERE ZLAYER = 103;"
+                "UPDATE ZVARIANTMETADATA SET ZBASIC_RATING = 2 WHERE ZLAYER = 102;"
+                "DELETE FROM ZIMAGEINCOLLECTION WHERE ZIMAGE = 4; DELETE FROM ZVARIANTMETADATA WHERE ZLAYER = 105;"
+                "DELETE FROM ZVARIANTLAYER WHERE Z_PK = 105; DELETE FROM ZVARIANT WHERE Z_PK = 5; DELETE FROM ZIMAGE WHERE Z_PK = 4;"
+                "DELETE FROM ZIMAGEINCOLLECTION WHERE Z_PK IN (1, 4);"
+                "UPDATE ZCOLLECTION SET ZNAME = 'Best' WHERE Z_PK = 8; UPDATE ZCOLLECTION SET ZNAME = '5 stars' WHERE Z_PK = 9;");
+
+        // A dry run says what an update would do, and does none of it.
+        Json dry = c("capture_one.update", {{"library", L}, {"dry_run", true}});
+        CHECK(dry["dry_run"].get<bool>());
+        CHECK_EQ(c("image.get", {{"library", L}, {"image", "IMG-B"}})["rating"].get<int>(), 3);
+        CHECK(c("library.info", {{"library", L}})["copied_from"]["updated_at"].is_null());
+
+        Json u = c("capture_one.update", {{"library", L}});
+        CHECK(!u["skipped"].get<bool>());
+        CHECK_EQ(u["images"]["added"].get<int>(), 1);
+        CHECK_EQ(u["images"]["gone"].get<int>(), 1);
+        CHECK_EQ(u["images"]["updated"].get<int>(), 0);
+        CHECK_EQ(u["images"]["unchanged"].get<int>(), 4);
+        CHECK_EQ(u["variants"]["added"].get<int>(), 1);
+        CHECK_EQ(u["variants"]["gone"].get<int>(), 1);
+        CHECK_EQ(u["variants"]["updated"].get<int>(), 1);    // B1
+        CHECK_EQ(u["variants"]["unchanged"].get<int>(), 4);  // A1, A2 (SpektraLab's kept), C1, E1
+        CHECK_EQ(u["collections"]["added"].get<int>(), 1);
+        CHECK_EQ(u["collections"]["updated"].get<int>(), 1);  // the smart album's name
+        CHECK_EQ(u["collections"]["unchanged"].get<int>(), 8);
+        CHECK_EQ(u["folders"]["unchanged"].get<int>(), 3);
+        CHECK_EQ(u["members"]["added"].get<int>(), 1);
+        CHECK_EQ(u["members"]["removed"].get<int>(), 1);
+        CHECK_EQ(u["members"]["kept"].get<int>(), 1);
+        CHECK_EQ(u["conflicts_kept"].get<int>(), 3);           // A2's rating, Picks' name, B in Picks
+        CHECK_EQ(u["conflicts"].size(), size_t(3));
+        for (auto key : {"images", "variants", "collections", "folders", "members", "conflicts_kept"}) CHECK(dry[key] == u[key]);
+
+        auto rating = [&](const char* image, int k) {
+            return c("image.get", {{"library", L}, {"image", image}})["variants"][k]["rating"].get<int>();
+        };
+        CHECK_EQ(rating("IMG-B", 0), 1);  // only Capture One changed it
+        CHECK_EQ(rating("IMG-A", 1), 5);  // both did: SpektraLab's
+        CHECK_EQ(rating("IMG-C", 0), 2);  // only SpektraLab did
+        CHECK_EQ(rating("IMG-A", 0), 0);
+        Json all = c("images.list", {{"library", L}})["images"];
+        CHECK(find_by(all, "uuid", "IMG-D").is_null());
+        CHECK(!find_by(all, "uuid", "IMG-F").is_null());
+        CHECK_EQ(c("image.get", {{"library", L}, {"image", "IMG-D"}})["origin_state"].get<std::string>(), std::string("removed"));
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        CHECK_EQ(find_by(cols, "uuid", "COL-NEW")["image_count"].get<int>(), 1);
+        CHECK(find_by(cols, "uuid", "COL-NEW")["parent"].is_null());
+        CHECK_EQ(find_by(cols, "uuid", "COL-PICKS")["name"].get<std::string>(), std::string("Mine"));
+        CHECK_EQ(find_by(cols, "uuid", "COL-SMART")["name"].get<std::string>(), std::string("5 stars"));
+        Json imp = c("images.list", {{"library", L}, {"collection", "COL-IMPORT"}, {"include_trashed", true}})["images"];
+        CHECK_EQ(imp.size(), size_t(2));
+        CHECK(find_by(imp, "uuid", "IMG-A").is_null());
+        Json picks = c("images.list", {{"library", L}, {"collection", "COL-PICKS"}})["images"];
+        CHECK_EQ(picks.size(), size_t(2));  // B kept, E added here (D is hidden, not gone from the album)
+        CHECK(!find_by(picks, "uuid", "IMG-B").is_null());
+        // SpektraLab's own rows are not Capture One's business.
+        CHECK_EQ(find_by(cols, "uuid", mine)["image_count"].get<int>(), 1);
+        CHECK(!find_by(all, "uuid", gid).is_null());
+        Json cf = c("library.info", {{"library", L}})["copied_from"];
+        CHECK(cf["updated_at"].is_string());
+        CHECK(cf["fingerprint"] != fp0);
+
+        // Nothing changed since: skipped, by fingerprint.
+        CHECK(c("capture_one.update", {{"library", L}})["skipped"].get<bool>());
+
+        // The baseline moved to Capture One's values: A2's is now 2, so once SpektraLab holds 2
+        // again, Capture One's next change to it comes in. B1's baseline is 1, and so is the copy.
+        c("meta.set", {{"library", L}, {"variants", {c("image.get", {{"library", L}, {"image", "IMG-A"}})["variants"][1]["uuid"]}}, {"rating", 2}});
+        fc.edit("UPDATE ZVARIANTMETADATA SET ZBASIC_RATING = 3 WHERE ZLAYER = 102; UPDATE ZVARIANTMETADATA SET ZBASIC_RATING = 4 WHERE ZLAYER = 103;");
+        Json u2 = c("capture_one.update", {{"library", L}});
+        CHECK_EQ(u2["conflicts_kept"].get<int>(), 0);
+        CHECK_EQ(u2["variants"]["updated"].get<int>(), 2);
+        CHECK_EQ(rating("IMG-A", 1), 3);
+        CHECK_EQ(rating("IMG-B", 0), 4);
+
+        // D comes back in Capture One: the same row, present again.
+        fc.edit("INSERT INTO ZIMAGE (Z_ENT, Z_PK, ZIMAGEUUID, ZIMAGEFILENAME, ZIMAGELOCATION, ZIMAGECLASSIFICATION) VALUES (12, 4, 'IMG-D', 'D.ARW', 4, 17);"
+                "INSERT INTO ZVARIANT (Z_ENT, Z_PK, ZINDEX, ZVARIANTUUID, ZIMAGE, ZCOMBINEDSETTINGS) VALUES (15, 5, 127, 'VAR-D1', 4, 105);"
+                "INSERT INTO ZVARIANTLAYER (Z_ENT, Z_PK, ZVARIANT) VALUES (20, 105, 5);"
+                "INSERT INTO ZVARIANTMETADATA (Z_ENT, Z_PK, ZLAYER, ZBASIC_RATING) VALUES (13, 105, 105, 1);");
+        Json u3 = c("capture_one.update", {{"library", L}});
+        CHECK_EQ(u3["images"]["restored"].get<int>(), 1);
+        CHECK_EQ(u3["variants"]["restored"].get<int>(), 1);
+        CHECK_EQ(u3["images"]["added"].get<int>(), 0);
+        CHECK(!find_by(c("images.list", {{"library", L}})["images"], "uuid", "IMG-D").is_null());
+        CHECK(!fs::exists(fc.db.string() + "-journal"));
+    });
+
+    run("update: a moved catalog is found again by its document UUID", [] {
+        fs::path root = tmpdir("copy-moved");
+        FakeCatalog fc(root);
+        Ctx c;
+        std::string L = c("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}})["library"];
+        fs::path moved = root / "Moved.cocatalog";
+        fs::rename(fc.package, moved);
+        CHECK_EQ(c.err("capture_one.update", {{"library", L}}), std::string("not_found"));
+        Json u = c("capture_one.update", {{"library", L}, {"source", moved.string()}});
+        CHECK(!u["skipped"].get<bool>());
+        CHECK_EQ(u["moved_from"].get<std::string>(), fc.package.string());
+        CHECK_EQ(u["images"]["unchanged"].get<int>(), 5);
+        CHECK_EQ(c("library.info", {{"library", L}})["copied_from"]["path"].get<std::string>(), moved.string());
+        // The in-catalog image is Capture One's file: it is where the package went.
+        Json e = c("image.get", {{"library", L}, {"image", "IMG-E"}});
+        CHECK_EQ(e["path"].get<std::string>(), (moved / "Originals/2026/01/02/1/E.tif").string());
+        CHECK(e["exists"].get<bool>());
+        CHECK(c("capture_one.update", {{"library", L}})["skipped"].get<bool>());
+        // Another catalog is not this one, wherever it is.
+        fs::path other_root = tmpdir("copy-moved-other");
+        FakeCatalog other(other_root);
+        other.edit("UPDATE ZDOCUMENTCONTENT SET ZDOCUMENTUUID = 'ANOTHER'");
+        CHECK_EQ(c.err("capture_one.update", {{"library", L}, {"source", other.package.string()}}), std::string("conflict"));
+        CHECK_EQ(c("library.info", {{"library", L}})["copied_from"]["path"].get<std::string>(), moved.string());
+    });
+
+    run("copy and update answer source_busy while Capture One writes", [] {
+        fs::path root = tmpdir("copy-busy");
+        FakeCatalog fc(root);
+        Ctx c;
+        touch(fc.db.string() + "-journal", "hot");
+        CHECK_EQ(c.err("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}}), std::string("source_busy"));
+        CHECK(!fs::exists(root / "Copy.spkcatalog"));
+        fs::remove(fc.db.string() + "-journal");
+        std::string L = c("capture_one.copy", {{"source", fc.package.string()}, {"path", (root / "Copy").string()}})["library"];
+        fc.edit("UPDATE ZVARIANTMETADATA SET ZBASIC_RATING = 1 WHERE ZLAYER = 103");
+        touch(fc.db.string() + "-journal", "hot");
+        CHECK_EQ(c.err("capture_one.update", {{"library", L}}), std::string("source_busy"));
+        CHECK_EQ(c("image.get", {{"library", L}, {"image", "IMG-B"}})["rating"].get<int>(), 3);
+        fs::remove(fc.db.string() + "-journal");
+        CHECK_EQ(c("capture_one.update", {{"library", L}})["variants"]["updated"].get<int>(), 1);
+    });
+}
+
+// --- images.add recent_import_at ------------------------------------------------------------------
+
+/// "yyyy-MM-dd HH:mm" in this Mac's local time, as new_recent_import names an album.
+static std::string local_name(const std::string& utc) {
+    std::tm tm{};
+    int y, mo, d, h, mi, s;
+    std::sscanf(utc.c_str(), "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s);
+    tm.tm_year = y - 1900; tm.tm_mon = mo - 1; tm.tm_mday = d; tm.tm_hour = h; tm.tm_min = mi; tm.tm_sec = s;
+    time_t t = timegm(&tm);
+    std::tm lt{};
+    localtime_r(&t, &lt);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &lt);
+    return buf;
+}
+
+static void recent_import_times() {
+    run("images.add recent_import_at: an old import keeps its time, its place and the newest-20 trim", [] {
+        fs::path root = tmpdir("import-at");
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "R").string()}})["library"];
+        auto import_at = [&](int day, int hour) {
+            char when[32];
+            std::snprintf(when, sizeof when, "2020-10-%02dT%02d:00:00Z", day, hour);
+            fs::path f = root / ("P/" + std::to_string(day) + "-" + std::to_string(hour) + ".NEF");
+            touch(f, f.filename().string());
+            Json r = c("images.add", {{"library", L}, {"items", {f.string()}}, {"recent_import_at", when}});
+            return std::pair(r, std::string(when));
+        };
+        // Twenty imports, newest first, as a migration might send them.
+        for (int day = 29; day >= 10; --day) import_at(day, 10);
+        auto albums = [&] {
+            Json cols = c("collections.list", {{"library", L}})["collections"];
+            return children_of(cols, uuid_of_kind(cols, "recent_imports"));
+        };
+        Json a = albums();
+        CHECK_EQ(a.size(), size_t(20));
+        // In time order, oldest first, each named and dated by its own time.
+        bool ordered = true;
+        for (size_t k = 1; k < a.size(); ++k) ordered = ordered && a[k - 1]["created_at"].get<std::string>() < a[k]["created_at"].get<std::string>();
+        CHECK(ordered);
+        CHECK_EQ(a[0]["created_at"].get<std::string>(), std::string("2020-10-10T10:00:00Z"));
+        CHECK_EQ(a[0]["name"].get<std::string>(), local_name("2020-10-10T10:00:00Z"));
+        CHECK_EQ(a[19]["created_at"].get<std::string>(), std::string("2020-10-29T10:00:00Z"));
+        // An import older than all twenty is trimmed at once: no album, the twenty stay.
+        auto [old, _] = import_at(5, 10);
+        CHECK_EQ(old["added"].get<int>(), 1);
+        CHECK(!old.contains("recent_import"));
+        a = albums();
+        CHECK_EQ(a.size(), size_t(20));
+        CHECK_EQ(a[0]["created_at"].get<std::string>(), std::string("2020-10-10T10:00:00Z"));
+        // One between them, added last, goes where its time puts it; the oldest goes.
+        auto [mid, when] = import_at(15, 12);
+        CHECK(mid.contains("recent_import"));
+        a = albums();
+        CHECK_EQ(a.size(), size_t(20));
+        CHECK_EQ(a[0]["created_at"].get<std::string>(), std::string("2020-10-11T10:00:00Z"));
+        Json m = find_by(a, "uuid", mid["recent_import"].get<std::string>());
+        CHECK_EQ(m["created_at"].get<std::string>(), when);
+        CHECK_EQ(m["name"].get<std::string>(), local_name(when));
+        CHECK_EQ(a[5]["uuid"].get<std::string>(), mid["recent_import"].get<std::string>());  // 11..15, then 15 12:00
+        ordered = true;
+        for (size_t k = 1; k < a.size(); ++k) ordered = ordered && a[k - 1]["created_at"].get<std::string>() < a[k]["created_at"].get<std::string>();
+        CHECK(ordered);
+        // An offset is a zone like any other; garbage is refused; no import, no album.
+        touch(root / "P/z.NEF", "z");
+        Json z = c("images.add", {{"library", L}, {"items", {(root / "P/z.NEF").string()}}, {"recent_import_at", "2020-10-30T18:00:00+08:00"}});
+        CHECK_EQ(find_by(albums(), "uuid", z["recent_import"].get<std::string>())["created_at"].get<std::string>(), std::string("2020-10-30T10:00:00Z"));
+        touch(root / "P/y.NEF", "y");
+        CHECK_EQ(c.err("images.add", {{"library", L}, {"items", {(root / "P/y.NEF").string()}}, {"recent_import_at", "last Tuesday"}}), std::string("invalid_params"));
+        touch(root / "P/x.NEF", "x");
+        CHECK(!c("images.add", {{"library", L}, {"items", {(root / "P/x.NEF").string()}}, {"recent_import", false},
+                                {"recent_import_at", "2020-10-31T10:00:00Z"}}).contains("recent_import"));
+        // Without it, the album is made now.
+        touch(root / "P/w.NEF", "w");
+        Json w = c("images.add", {{"library", L}, {"items", {(root / "P/w.NEF").string()}}});
+        CHECK(find_by(albums(), "uuid", w["recent_import"].get<std::string>())["created_at"].get<std::string>() > std::string("2026-01-01"));
+    });
+
+    run("images.add recent_import_at in a Capture One mirror", [] {
+        fs::path root = tmpdir("import-at-mirror");
+        FakeCatalog fc(root);
+        touch(root / "New/x.NEF", "x");
+        Ctx c;
+        std::string L = c("capture_one.link", {{"source", fc.package.string()}, {"path", (root / "M").string()}})["library"];
+        Json add = c("images.add", {{"library", L}, {"items", {(root / "New/x.NEF").string()}}, {"recent_import_at", "2025-11-05T04:39:00Z"}});
+        Json cols = c("collections.list", {{"library", L}})["collections"];
+        Json al = find_by(cols, "uuid", add["recent_import"].get<std::string>());
+        CHECK_EQ(al["created_at"].get<std::string>(), std::string("2025-11-05T04:39:00Z"));
+        CHECK_EQ(al["name"].get<std::string>(), local_name("2025-11-05T04:39:00Z"));
+        // The row SpektraLab made to hold it is dated now, not by the import.
+        CHECK(find_by(cols, "uuid", al["parent"].get<std::string>())["created_at"].get<std::string>() > std::string("2026-01-01"));
+    });
+}
+
 // --- part 1 ------------------------------------------------------------------------------------
 
 static void synthetic() {
@@ -891,13 +1337,14 @@ static void synthetic() {
         {
             // Back to what spklib 0.1.0 wrote: schema 1, no fixed rows.
             Db d((root / "Old.spkcatalog/Library.spkdb").string(), Db::Mode::ReadWrite);
-            d.exec("DROP INDEX image_captured; DROP INDEX variant_keyword_keyword; DROP TABLE variant_keyword; DROP TABLE watched_folder;"
+            d.exec("DROP TABLE copy_member; DROP TABLE copy_source;"
+                   " DROP INDEX image_captured; DROP INDEX variant_keyword_keyword; DROP TABLE variant_keyword; DROP TABLE watched_folder;"
                    " ALTER TABLE collection DROP COLUMN origin_created_at; ALTER TABLE image DROP COLUMN described_at;"
                    " DELETE FROM collection WHERE kind IN ('root', 'all_images', 'recent_imports', 'trash', 'in_library');"
                    " UPDATE meta SET value = '1' WHERE key = 'schema_version'");
         }
         std::string L2 = c("library.open", {{"path", (root / "Old.spkcatalog").string()}})["library"];
-        CHECK_EQ(c("library.info", {{"library", L2}})["schema_version"].get<int>(), 2);
+        CHECK_EQ(c("library.info", {{"library", L2}})["schema_version"].get<int>(), 3);
         Json cols = c("collections.list", {{"library", L2}})["collections"];
         CHECK(!find_by(cols, "kind", "all_images").is_null());
         CHECK_EQ(find_by(cols, "kind", "all_images")["image_count"].get<int>(), 1);
@@ -906,10 +1353,38 @@ static void synthetic() {
         CHECK_EQ(c("images.list", {{"library", L2}})["total"].get<int>(), 1);  // the same file, not twice
     });
 
+    run("a schema-2 library is migrated to 3 on open", [] {
+        fs::path root = tmpdir("migrate-3");
+        Ctx c;
+        std::string L = c("library.create", {{"path", (root / "Two").string()}})["library"];
+        c("library.close", {{"library", L}});
+        {
+            // What spklib 0.2.x wrote: no copy tables.
+            Db d((root / "Two.spkcatalog/Library.spkdb").string(), Db::Mode::ReadWrite);
+            d.exec("DROP TABLE copy_member; DROP TABLE copy_source; UPDATE meta SET value = '2' WHERE key = 'schema_version'");
+        }
+        std::string L2 = c("library.open", {{"path", (root / "Two.spkcatalog").string()}})["library"];
+        Json info = c("library.info", {{"library", L2}});
+        CHECK_EQ(info["schema_version"].get<int>(), 3);
+        CHECK(info["copied_from"].is_null());
+        // Not a copy: an update is refused as read-only (and the tables are there to ask).
+        CHECK_EQ(c.err("capture_one.update", {{"library", L2}}), std::string("read_only"));
+        Db d((root / "Two.spkcatalog/Library.spkdb").string(), Db::Mode::ReadWrite);
+        CHECK(d.has_table("copy_source"));
+        CHECK(d.has_table("copy_member"));
+    });
+
+    copies();
+    recent_import_times();
+
     run("the method table and the version", [] {
         Ctx c;
         Json v = c("sdk.version");
         CHECK_EQ(v["abi"].get<int>(), SPKLIB_ABI_VERSION);
+        CHECK_EQ(v["schema"].get<int>(), 3);
+        Json ms = c("sdk.methods")["methods"];
+        CHECK(!find_by(ms, "method", "capture_one.copy").is_null());
+        CHECK_EQ(find_by(ms, "method", "capture_one.update")["library"].get<bool>(), true);
         CHECK_EQ(v["capture_one"]["write_back"].get<bool>(), false);
         CHECK(c("sdk.methods")["methods"].size() > 20);
         CHECK_EQ(c.err("images.list", {{"library", "L999"}}), std::string("not_found"));
@@ -1140,6 +1615,115 @@ static void real_catalog(const std::string& package) {
         CHECK_EQ(s["variants"]["updated"].get<int64_t>(), int64_t(0));
         CHECK_EQ(s["collections"]["updated"].get<int64_t>(), int64_t(0));
         CHECK(c("library.sync", {{"library", L}})["skipped"].get<bool>());
+    });
+
+    // A copy, into SPKLIB_COPY_DIR when given (kept there to look at), else the test's temp folder.
+    fs::path copy_dir = std::getenv("SPKLIB_COPY_DIR") ? fs::path(std::getenv("SPKLIB_COPY_DIR")) : root;
+    fs::create_directories(copy_dir);
+    fs::path copy_path = copy_dir / "Real copy.spkcatalog";
+    fs::remove_all(copy_path);
+    std::string CL;
+    run("copy the real catalog: counts against an independent reading", [&] {
+        auto a = std::chrono::steady_clock::now();
+        Json cr = c("capture_one.copy", {{"source", package}, {"path", copy_path.string()}});
+        double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
+        CL = cr["library"];
+        Json rep = cr["report"];
+        std::printf("   copy: %.2f s %s\n   report: images %lld, variants %lld, collections %lld, folders %lld, keywords %lld,"
+                    " album_members %lld, locations %lld, parents_repaired %lld\n",
+                    s, rep["ms"].dump().c_str(), (long long)rep["images"].get<int64_t>(), (long long)rep["variants"].get<int64_t>(),
+                    (long long)rep["collections"].get<int64_t>(), (long long)rep["folders"].get<int64_t>(),
+                    (long long)rep["keywords"].get<int64_t>(), (long long)rep["album_members"].get<int64_t>(),
+                    (long long)rep["locations"].get<int64_t>(), (long long)rep["parents_repaired"].get<int64_t>());
+        auto n = [&](const std::string& sql) { auto q = o.prepare(sql); q.step(); return q.i64(0); };
+        CHECK_EQ(rep["images"].get<int64_t>(), n("SELECT count(*) FROM ZIMAGE WHERE ZIMAGELOCATION IN (SELECT Z_PK FROM ZPATHLOCATION)"));
+        CHECK_EQ(rep["variants"].get<int64_t>(), n("SELECT count(*) FROM ZVARIANT WHERE ZIMAGE IN (SELECT Z_PK FROM ZIMAGE"
+                                                    " WHERE ZIMAGELOCATION IN (SELECT Z_PK FROM ZPATHLOCATION))"));
+        CHECK_EQ(rep["locations"].get<int64_t>(), n("SELECT count(*) FROM ZPATHLOCATION"));
+        CHECK_EQ(rep["collections"].get<int64_t>() + rep["folders"].get<int64_t>(), n("SELECT count(*) FROM ZCOLLECTION"));
+        CHECK_EQ(rep["folders"].get<int64_t>(), n("SELECT count(*) FROM ZCOLLECTION c JOIN ZENTITIES e ON e.Z_ENT = c.Z_ENT"
+                                                   " WHERE e.ZNAME IN ('CatalogFolderCollection', 'SessionFolderCollection', 'TempFolderCollection')"));
+        CHECK_EQ(rep["album_members"].get<int64_t>(), n("SELECT count(*) FROM (SELECT DISTINCT ic.ZCOLLECTION, ic.ZIMAGE FROM ZIMAGEINCOLLECTION ic"
+                                                         " JOIN ZCOLLECTION c ON c.Z_PK = ic.ZCOLLECTION JOIN ZENTITIES e ON e.Z_ENT = c.Z_ENT"
+                                                         " JOIN ZIMAGE i ON i.Z_PK = ic.ZIMAGE"
+                                                         " WHERE e.ZNAME IN ('AlbumCollection', 'VariantCollection'))"));
+        CHECK_EQ(rep["keywords"].get<int64_t>(), o.has_table("ZKEYWORD") ? n("SELECT count(*) FROM ZKEYWORD") : int64_t(0));
+        CHECK_EQ(c("images.list", {{"library", CL}, {"limit", 0}})["total"].get<int64_t>(), n("SELECT count(*) FROM ZIMAGE WHERE ZISTRASHED = 0"));
+        std::printf("   visible in the copy: %lld\n", (long long)c("images.list", {{"library", CL}, {"limit", 0}})["total"].get<int64_t>());
+
+        // Every image and variant, as in the mirror check: path, trash flag, rating, colour tag.
+        Json all = c("images.list", {{"library", CL}, {"include_trashed", true}})["images"];
+        std::map<std::string, Json> by_uuid;
+        for (auto& j : all) by_uuid[j["uuid"]] = j;
+        auto q = o.prepare("SELECT i.ZIMAGEUUID, p.ZISRELATIVE, p.ZMACROOT, p.ZRELATIVEPATH, i.ZIMAGEFILENAME, i.ZISTRASHED"
+                           " FROM ZIMAGE i JOIN ZPATHLOCATION p ON p.Z_PK = i.ZIMAGELOCATION");
+        int64_t bad = 0;
+        while (q.step()) {
+            auto it = by_uuid.find(q.text(0));
+            if (it == by_uuid.end() ||
+                it->second["path"] != oracle_resolve(q.i64(1) != 0, q.text(2), q.text(3), package) + "/" + q.text(4) ||
+                it->second["trashed"].get<bool>() != (q.i64(5) != 0) || it->second["origin"] != "local") ++bad;
+        }
+        CHECK_EQ(bad, int64_t(0));
+        std::map<std::string, std::pair<int64_t, int64_t>> sdk;
+        for (auto& j : all)
+            for (auto& v : j["variants"])
+                sdk[v["uuid"]] = {v["rating"].get<int64_t>(), v["color_tag"].is_null() ? 0 : v["color_tag"].get<int64_t>()};
+        auto vs = o.prepare("SELECT v.ZVARIANTUUID, COALESCE(m.ZBASIC_RATING, 0), COALESCE(m.ZCOLOR_TAG_INDEX, 0) FROM ZVARIANT v"
+                            " JOIN ZVARIANTLAYER l ON l.Z_PK = v.ZCOMBINEDSETTINGS JOIN ZVARIANTMETADATA m ON m.ZLAYER = l.Z_PK");
+        int64_t vbad = 0;
+        while (vs.step()) {
+            auto it = sdk.find(vs.text(0));
+            if (it == sdk.end() || it->second != std::pair(vs.i64(1), vs.i64(2))) ++vbad;
+        }
+        CHECK_EQ(vbad, int64_t(0));
+
+        // Albums and folders hold what Capture One's do; the import albums keep their times.
+        Json cols = c("collections.list", {{"library", CL}})["collections"];
+        auto s2 = o.prepare("SELECT c.ZUUID, count(ic.Z_PK) FROM ZCOLLECTION c JOIN ZENTITIES e ON e.Z_ENT = c.Z_ENT"
+                            " LEFT JOIN ZIMAGEINCOLLECTION ic ON ic.ZCOLLECTION = c.Z_PK"
+                            " LEFT JOIN ZIMAGE i ON i.Z_PK = ic.ZIMAGE AND i.ZISTRASHED = 0"
+                            " WHERE e.ZNAME IN ('AlbumCollection', 'CatalogFolderCollection') AND (ic.Z_PK IS NULL OR i.Z_PK IS NOT NULL)"
+                            " GROUP BY c.Z_PK");
+        int64_t checked = 0, cbad = 0;
+        while (s2.step()) {
+            ++checked;
+            Json col = find_by(cols, "uuid", s2.text(0));
+            if (col.is_null() || col["image_count"] != s2.i64(1)) ++cbad;
+        }
+        CHECK_EQ(cbad, int64_t(0));
+        std::string ri = uuid_of_kind(cols, "recent_imports");
+        auto s3 = o.prepare("SELECT c.ZUUID, strftime('%Y-%m-%dT%H:%M:%SZ', c.ZDATECREATED, 'unixepoch') FROM ZCOLLECTION c"
+                            " WHERE c.ZPARENT = (SELECT ZLASTIMPORTSCOLLECTION FROM ZCOLLECTION WHERE Z_PK = (SELECT ZROOTCOLLECTION FROM ZDOCUMENTCONTENT))");
+        int64_t imports = 0, ibad = 0;
+        while (s3.step()) {
+            ++imports;
+            Json col = find_by(cols, "uuid", s3.text(0));
+            if (col.is_null() || col["parent"] != ri || col["created_at"] != s3.text(1)) ++ibad;
+        }
+        CHECK(imports > 0);
+        CHECK_EQ(ibad, int64_t(0));
+        int roots = 0;
+        for (auto& col : cols) roots += col["kind"] == "root";
+        CHECK_EQ(roots, 1);
+        std::printf("   albums and folders checked %lld, recent imports %lld\n", (long long)checked, (long long)imports);
+    });
+
+    run("an update of the unchanged copy: skipped, and when forced, changes nothing", [&] {
+        Json u = c("capture_one.update", {{"library", CL}});
+        CHECK(u["skipped"].get<bool>());
+        auto a = std::chrono::steady_clock::now();
+        Json f = c("capture_one.update", {{"library", CL}, {"force", true}});
+        std::printf("   forced update: %.2f s\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count());
+        for (auto t : {"images", "variants", "collections", "folders", "locations", "keywords"}) {
+            CHECK_EQ(f[t]["added"].get<int64_t>(), int64_t(0));
+            CHECK_EQ(f[t]["updated"].get<int64_t>(), int64_t(0));
+            CHECK_EQ(f[t]["gone"].get<int64_t>(), int64_t(0));
+        }
+        CHECK_EQ(f["members"]["added"].get<int64_t>() + f["members"]["removed"].get<int64_t>(), int64_t(0));
+        CHECK_EQ(f["conflicts_kept"].get<int64_t>(), int64_t(0));
+        std::printf("   unchanged: images %lld, variants %lld\n", (long long)f["images"]["unchanged"].get<int64_t>(),
+                    (long long)f["variants"]["unchanged"].get<int64_t>());
     });
 
     run("the Capture One package is exactly as it was", [&] {

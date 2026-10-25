@@ -12,7 +12,7 @@
 #include "library.hpp"
 
 #ifndef SPKLIB_VERSION
-#define SPKLIB_VERSION "0.2.0"
+#define SPKLIB_VERSION "0.3.0"
 #endif
 
 namespace spklib {

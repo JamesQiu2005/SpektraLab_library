@@ -102,7 +102,9 @@ points SpektraLab at a folder's new place without touching Capture One.
    file with plain `read()`s, re-checks size, mtime and the SQLite header's file-change counter, and
    runs `PRAGMA quick_check` on the copy. It retries up to 5 times, then answers `source_busy`.
 3. The copy is opened `mode=ro&immutable=1` plus `PRAGMA query_only`, and deleted after the sync.
-4. Nothing is written to or created in the package. The test proves it by stat-and-hash census of all
+4. `capture_one.copy` and `capture_one.update` (0.3.0) read the catalog the same way, through the same
+   snapshot; a hot journal answers `source_busy` to them too.
+5. Nothing is written to or created in the package. The test proves it by stat-and-hash census of all
    41,342 entries before and after (`the Capture One package is exactly as it was`).
 
 A sync copies 67 MB and mirrors 10k images in about 0.3 s (read 170 ms, write 90 ms on this Mac). An

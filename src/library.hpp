@@ -28,6 +28,8 @@
 
 namespace spklib {
 
+namespace c1 { struct Catalog; }
+
 /// An error with a code the app can switch on: not_found, invalid_params,
 /// read_only, conflict, source_busy, unsupported, exists, io, internal.
 struct ApiError : std::runtime_error {
@@ -45,7 +47,7 @@ double now_unix();
 
 class Library {
 public:
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
 
     /// kind is "catalog" (`<path>` is a `.spkcatalog` package) or "session"
     /// (`<path>` is the session folder).
@@ -71,6 +73,22 @@ public:
     /// Copy what changed in the linked catalog. Skipped when the source's
     /// fingerprint is the one last synced, unless `force`.
     Json sync(const Json& options);
+
+    // --- Capture One, copied ----------------------------------------------------------
+    /// A new SpektraLab catalog at `path` holding a copy of the catalog at
+    /// `source`: every row SpektraLab's own (origin local), each remembering
+    /// Capture One's key and the values Capture One had, so that `update_copy`
+    /// can bring in what Capture One changed later. `mirror`, a library made
+    /// by `capture_one.link` from the same catalog, contributes SpektraLab's
+    /// overrides and edits. Fills `report`.
+    static std::unique_ptr<Library> copy_capture_one(const std::string& source, const std::string& path,
+                                                     const Json& options, Library* mirror, Json& report);
+    /// Bring in what changed in the Capture One catalog since the copy or the
+    /// last update. SpektraLab wins: a field is taken from Capture One only
+    /// where the copy still holds the value Capture One had before.
+    Json update_copy(const Json& params);
+    /// `copied_from` as `library.info` reports it, or null.
+    Json copied_from();
 
     // --- reading ---------------------------------------------------------------------
     Json collections(const Json& params);
@@ -122,11 +140,12 @@ public:
     ~Library();
 
 private:
+    Json merge_capture_one(const c1::Catalog& cat, const std::string& package, Library* mirror);
     void lock_session();
     void ensure_system_collections();
     void require_own_library();
     void scope(const Json& params, Where& w);
-    std::optional<int64_t> new_recent_import(const std::vector<int64_t>& images);
+    std::optional<int64_t> new_recent_import(const std::vector<int64_t>& images, std::optional<double> at = std::nullopt);
     Json sync_tree(const std::string& root, bool recursive, const std::set<std::string>& skip, bool recent_import);
     Json sync_watched(int64_t watched_id, bool first);
     std::vector<int64_t> locations_under(const std::string& root, bool recursive);

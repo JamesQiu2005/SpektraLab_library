@@ -29,6 +29,8 @@ const std::map<std::string, Method>& table() {
         {"sdk.methods", {false, false, "this table"}},
         {"capture_one.probe", {false, false, "read a Capture One catalog's version, counts and verdict (via a snapshot)"}},
         {"capture_one.link", {false, true, "create or reopen the SpektraLab library mirroring a Capture One catalog, and sync it"}},
+        {"capture_one.copy", {false, true, "copy a Capture One catalog into a new, independent SpektraLab catalog that can be updated from it"}},
+        {"capture_one.update", {true, true, "bring a copied catalog up to date with its Capture One catalog; SpektraLab's changes win"}},
         {"library.create", {false, true, "create a SpektraLab catalog or session"}},
         {"library.open", {false, false, "open a SpektraLab catalog or session"}},
         {"library.close", {true, false, "close a library handle"}},
@@ -179,6 +181,23 @@ Json Context::call(const std::string& method, const Json& params_in) {
         out["sync"] = report;
         return out;
     }
+    if (method == "capture_one.copy") {
+        std::string source = params.value("source", std::string());
+        if (source.empty()) throw ApiError("invalid_params", "'source' is required");
+        std::string path = params.value("path", std::string());
+        if (path.empty()) throw ApiError("invalid_params", "'path' (the new .spkcatalog) is required");
+        Library* mirror = nullptr;
+        if (params.contains("mirror") && !params["mirror"].is_null()) {
+            if (!params["mirror"].is_string()) throw ApiError("invalid_params", "'mirror' is a library handle");
+            auto it = libraries_.find(params["mirror"].get<std::string>());
+            if (it == libraries_.end()) throw ApiError("not_found", "no open library " + params["mirror"].get<std::string>());
+            mirror = it->second.get();
+        }
+        Json report;
+        Json out = open_library(Library::copy_capture_one(source, path, params, mirror, report));
+        out["report"] = report;
+        return out;
+    }
     if (method == "library.create") {
         std::string path = params.value("path", std::string());
         if (path.empty()) throw ApiError("invalid_params", "'path' is required");
@@ -203,6 +222,7 @@ Json Context::call(const std::string& method, const Json& params_in) {
     Library& l = lib(params);
     if (method == "library.info") return l.info();
     if (method == "library.sync") return l.sync(params);
+    if (method == "capture_one.update") return l.update_copy(params);
     if (method == "collections.list") return l.collections(params);
     if (method == "images.list") return l.images(params);
     if (method == "images.lookup") return l.lookup(params);

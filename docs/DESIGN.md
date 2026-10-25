@@ -39,6 +39,7 @@ edit           per variant: SpektraLab's JSON, revision, modified_at
 collection     tree: root, project, group, album, smart_album, folder, all_images, trash, ...
 collection_image  album membership
 keyword, meta, sync_log, session_folder (roles), fs_intent (crash-safe moves)
+watched_folder, variant_keyword (schema 2); copy_source, copy_member (schema 3: a copy's link back)
 ```
 
 ### Who owns which column
@@ -72,6 +73,45 @@ table-by-table diagnosis and the snapshot procedure.
 Capture One **sessions** are probe-only: `capture_one.probe` reads a `.cosessiondb`, and
 `capture_one.link` refuses it with `unsupported`. Their per-image state lives in `.cos` sidecars, and
 their schema could not be checked against a real session (SESSION-DESIGN.md §2, §6).
+
+## Capture One, copied (0.3.0)
+
+A copy is the other way to bring a Capture One catalog in: `capture_one.copy {source, path}` makes a
+new `.spkcatalog`, saved wherever the person chooses, that is an ordinary SpektraLab catalog (origin
+`none`) and not a mirror. Every row is `origin = 'local'` and SpektraLab's to change. The copied
+rating, colour tag and trash flag are written into SpektraLab's own columns (`rating`, `color_tag`,
+`trashed`), not as overrides of Capture One's, so a copy behaves like any library SpektraLab made.
+API-SPEC.md, "Copies", says what it holds.
+
+A copy remembers where it came from, so `capture_one.update` can bring in Capture One's later work:
+
+- **`copied_from`** in `meta` (as JSON): the package, its document UUID, format, fingerprint,
+  `copied_at`, `updated_at`. An update finds a moved catalog by a new `source` whose document UUID is the
+  copy's, and refuses another catalog with `conflict`. Images inside the Capture One package keep
+  `base = 'origin'` and resolve against `copied_from.path`, so they follow the package.
+- **`copy_source`** (schema 3): per copied row, Capture One's key, the row it became (by uuid, never a
+  rowid, which SQLite can reuse), and the **baseline**: the values Capture One had at the copy or the
+  last update. Capture One's key is deliberately *not* in `origin_key`: that column means "Capture One's
+  key" only on `origin = 'capture_one'` rows, which a sync selects and marks by it; a copied row is not
+  one. A side table also outlives the row, so a copied album SpektraLab deleted is a tombstone an update
+  does not bring back.
+- **`copy_member`**: album memberships as Capture One had them, by keys.
+
+**SpektraLab wins.** For each tracked field an update compares three values: Capture One's now, the
+baseline, and the copy's. Capture One's change is applied only if the copy still holds the baseline;
+if SpektraLab changed the field too, its value stays and is counted in `conflicts_kept`. The baseline
+becomes Capture One's value either way, so a conflict is reported once, and a later Capture One change
+is judged against the value Capture One last had. Membership is judged per album: Capture One's
+additions are added; its removals are applied only to an album whose members are still exactly the
+baseline's. A row gone from Capture One is marked `removed` (never deleted, its memberships kept) and is
+present again if it returns; `copy_source.removed` records that the update marked it, so a row a
+watched-folder sync marked removed (its file went) is not revived by Capture One. An update runs in one
+transaction; `dry_run` rolls it back and reports what it would have done. It is skipped, without a
+snapshot, while the catalog's fingerprint is the one last read.
+
+`mirror` on a copy carries a linked catalog's SpektraLab data (rating and colour-tag overrides, trash
+flags, edits) into the copy. The baseline stays Capture One's, so those values count as SpektraLab's
+changes and win at updates. A mirror's own albums, imported images and extra variants are not carried.
 
 ## Edits
 
