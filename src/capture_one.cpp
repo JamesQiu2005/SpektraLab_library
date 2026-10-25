@@ -380,8 +380,8 @@ Catalog read(const std::string& snapshot_path) {
     {
         Columns c{db, "ZCOLLECTION"};
         auto s = db.prepare("SELECT Z_PK, Z_ENT, " + c("ZUUID") + ", ZNAME, ZPARENT, " + c("ZCOLLECTIONINDEX") + ", " +
-                            c("ZFOLDERLOCATION") + ", " + c("ZSMARTCRITERIA") + ", " + c("ZSORTORDER") +
-                            " FROM ZCOLLECTION ORDER BY Z_PK");
+                            c("ZFOLDERLOCATION") + ", " + c("ZSMARTCRITERIA") + ", " + c("ZSORTORDER") + ", " +
+                            c("ZDATECREATED") + " FROM ZCOLLECTION ORDER BY Z_PK");
         while (s.step()) {
             Collection co;
             co.pk = s.i64(0);
@@ -395,6 +395,7 @@ Catalog read(const std::string& snapshot_path) {
             co.folder_location = s.opt_i64(6);
             co.smart_criteria = nonempty(s.opt_text(7));
             co.sort_order = s.text(8);
+            co.created_at = s.opt_f64(9);
             cat.collections.push_back(std::move(co));
         }
         if (cat.root_collection) {

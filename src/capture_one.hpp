@@ -101,6 +101,10 @@ struct Collection {
     std::string uuid, name, sort_order;
     std::optional<int64_t> parent, position, folder_location;
     std::optional<std::string> smart_criteria;
+    /// ZDATECREATED: a real UTC instant. A Recent Imports album's is the
+    /// import's time, which its name ("2026年10月3日 16:53") spells in the UI
+    /// language and the zone of the Mac that imported.
+    std::optional<double> created_at;
 };
 
 struct Keyword {

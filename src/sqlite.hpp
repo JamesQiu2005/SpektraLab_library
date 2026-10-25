@@ -90,6 +90,8 @@ public:
     void reset();
 
     bool is_null(int col) const { return sqlite3_column_type(s_, col) == SQLITE_NULL; }
+    /// SQLITE_INTEGER, SQLITE_FLOAT, SQLITE_TEXT, SQLITE_BLOB or SQLITE_NULL.
+    int type(int col) const { return sqlite3_column_type(s_, col); }
     int64_t i64(int col) const { return sqlite3_column_int64(s_, col); }
     double f64(int col) const { return sqlite3_column_double(s_, col); }
     std::string text(int col) const;
